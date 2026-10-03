@@ -1,4 +1,5 @@
-// The only thing the page gets from the desktop shell: window.goviralDesktop = { version, platform },
+// What the page gets from the desktop shell: window.goviralDesktop = { version, platform } (and,
+// on the app's own pages, `tiktok`: Groot posts to TikTok, below),
 // so the app can tell it is inside the downloaded app (e.g. hide its own "Install GoViral" card).
 // Sandboxed: no Node, no file system, nothing else crosses over.
 //
@@ -14,12 +15,29 @@ const arg = (name) => {
   return hit ? hit.slice(`--gvd-${name}=`.length) : "";
 };
 
+const ORIGIN = arg("origin");
+
+// Groot posts to TikTok (src/tiktok/*): only on the app's own pages (<origin>/desktop), and the
+// main process checks the caller and every field again. post() resolves when the video is posted
+// (Auto), filled in and handed over (Manual), failed or stopped; onProgress() hears each step and
+// returns the function that stops listening.
+const isApp = (() => { try { return location.origin === ORIGIN && /^\/desktop(\/|$)/.test(location.pathname); } catch { return false; } })();
+const tiktok = isApp ? Object.freeze({
+  post: (req) => ipcRenderer.invoke("gvd:tiktok:post", req),
+  stop: () => ipcRenderer.invoke("gvd:tiktok:stop"),
+  open: () => ipcRenderer.invoke("gvd:tiktok:open"),
+  onProgress: (cb) => {
+    const fn = (_e, p) => { try { cb(p); } catch { /* the page's own problem */ } };
+    ipcRenderer.on("gvd:tiktok:progress", fn);
+    return () => ipcRenderer.removeListener("gvd:tiktok:progress", fn);
+  },
+}) : undefined;
+
 contextBridge.exposeInMainWorld("goviralDesktop", Object.freeze({
   version: arg("version"),
   platform: process.platform === "darwin" ? "mac" : process.platform === "win32" ? "windows" : process.platform,
+  ...(tiktok ? { tiktok } : {}),
 }));
-
-const ORIGIN = arg("origin");
 const STRIP = Number(arg("titlebar")) || 0;
 
 function addStrip() {

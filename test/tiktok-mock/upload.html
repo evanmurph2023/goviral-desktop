@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TikTok Studio (local mock)</title>
+<!--
+  A LOCAL MOCK of TikTok Studio's upload page, for scripts/tiktok-harness.cjs only. It is not
+  TikTok and talks to nothing. It has what Groot's engine drives on the real page: a hidden file
+  input, an upload that takes a moment, a caption editor that starts with the file name, "Add link"
+  → Products → search → pick → Next → Add, a Post button and a "Post now" confirmation.
+  Query switches:
+    ?v=changed   the Post button and the Add link button look different (forces the AI fallback)
+    ?captcha=1   a captcha covers the page after the upload, until the harness removes it
+    ?login=1     a log-in screen until the harness "logs in"
+  Everything that happens is recorded in window.__mock for the harness to read.
+-->
+<style>
+  body { margin: 0; font: 14px system-ui, sans-serif; background: #fff; color: #161823; }
+  header { height: 56px; display: flex; align-items: center; padding: 0 24px; border-bottom: 1px solid #eee; font-weight: 700; }
+  main { padding: 24px; max-width: 900px; }
+  .drop { border: 2px dashed #ccc; border-radius: 12px; padding: 60px; text-align: center; }
+  button, .btn-pub { font: inherit; padding: 8px 18px; border-radius: 6px; border: 1px solid #ddd; background: #f1f1f2; cursor: pointer; }
+  button[disabled] { opacity: 0.4; cursor: default; }
+  .post, .btn-pub { background: #fe2c55; color: #fff; border-color: #fe2c55; display: inline-block; }
+  .caption-box { min-height: 80px; border: 1px solid #ddd; border-radius: 8px; padding: 10px; margin: 8px 0 16px; }
+  [role=dialog] { position: fixed; inset: 0; margin: auto; width: 460px; height: 380px; background: #fff; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.25); padding: 20px; box-sizing: border-box; }
+  [role=option], [role=radio] { padding: 10px; border: 1px solid #eee; border-radius: 6px; margin: 6px 0; cursor: pointer; }
+  [aria-checked=true], [aria-selected=true] { border-color: #fe2c55; background: #fff0f3; }
+  .captcha_verify_container { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 20px; z-index: 10; }
+  .chip { display: inline-block; margin-bottom: 16px; padding: 6px 10px; border-radius: 6px; background: #f1f1f2; }
+  .row { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
+</style>
+</head>
+<body>
+<header>TikTok Studio · Upload (local mock)</header>
+<main>
+  <section id="login" hidden>
+    <h1>Log in to TikTok</h1>
+    <input type="password" placeholder="Password" aria-label="Password">
+    <button id="loginBtn">Log in</button>
+  </section>
+
+  <section id="pick">
+    <div class="drop">
+      <p>Select video to upload</p>
+      <button id="selectBtn">Select video</button>
+      <input type="file" accept="video/*" id="file" style="display:none">
+    </div>
+  </section>
+
+  <section id="form" hidden>
+    <div data-e2e="upload_status_text" id="status">Uploading 0%</div>
+    <h3>Description</h3>
+    <div data-e2e="caption_container"><div class="caption-box public-DraftEditor-content" contenteditable="true" role="combobox" id="caption"></div></div>
+    <div id="productChip"></div>
+    <div id="linkSlot"></div>
+    <div class="row" id="postSlot"></div>
+  </section>
+
+  <section id="done" hidden><h2>Your video has been posted</h2><p>Manage your posts</p></section>
+</main>
+
+<div role="dialog" id="dlg" hidden aria-label="Add link">
+  <div id="step1">
+    <h3>Add link</h3>
+    <div role="option" id="optProducts">Products</div>
+    <div role="option" id="optOther">Other links</div>
+    <div class="row"><button id="next1" disabled>Next</button></div>
+  </div>
+  <div id="step2" hidden>
+    <h3>Add product</h3>
+    <input placeholder="Search products" id="search">
+    <div id="rows"></div>
+    <div class="row"><button id="next2" disabled>Next</button></div>
+  </div>
+  <div id="step3" hidden>
+    <h3>Product name</h3>
+    <input id="pname">
+    <div class="row"><button id="addBtn">Add</button></div>
+  </div>
+</div>
+
+<div role="dialog" id="confirm" hidden aria-label="Post now?">
+  <h3>Post now?</h3><p>Your video will be public.</p>
+  <div class="row"><button id="postNow">Post now</button><button id="cancel">Cancel</button></div>
+</div>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  const changed = q.get("v") === "changed";
+  const $ = (id) => document.getElementById(id);
+  const M = (window.__mock = { variant: changed ? "changed" : "normal", file: null, size: 0, caption: null, product: null, posted: false, events: [] });
+  const ev = (e) => M.events.push(e);
+  const PRODUCTS = ["Stanley Quencher H2.0 40 oz", "Hydro Flask 40 oz Tumbler", "Owala FreeSip Bottle 24 oz"];
+
+  // log in
+  if (q.get("login") === "1" && !sessionStorage.getItem("loggedIn")) { $("login").hidden = false; $("pick").hidden = true; ev("login shown"); }
+  $("loginBtn").onclick = () => { sessionStorage.setItem("loggedIn", "1"); location.reload(); };
+
+  // upload
+  $("selectBtn").onclick = () => $("file").click();
+  $("file").addEventListener("change", () => {
+    const f = $("file").files[0];
+    if (!f) return;
+    M.file = f.name; M.size = f.size; ev("file " + f.name);
+    $("pick").hidden = true; $("form").hidden = false;
+    $("caption").textContent = f.name.replace(/\.mp4$/, "");
+    let pct = 0;
+    const t = setInterval(() => {
+      pct += 25;
+      $("status").textContent = pct < 100 ? `Uploading ${pct}%` : "Uploaded";
+      if (pct >= 100) {
+        clearInterval(t);
+        $("status").setAttribute("data-status", "success");
+        enablePost();
+        ev("uploaded");
+        if (q.get("captcha") === "1") {
+          const c = document.createElement("div");
+          c.className = "captcha_verify_container"; c.id = "captcha";
+          c.textContent = "Drag the slider to fit the puzzle";
+          document.body.appendChild(c);
+          ev("captcha shown");
+        }
+      }
+    }, 300);
+  });
+
+  // the Add link button (renamed in the changed variant)
+  const link = document.createElement("button");
+  link.textContent = changed ? "Attach a shop link" : "Add link";
+  link.id = "addlink";
+  link.onclick = () => { $("dlg").hidden = false; ev("link dialog"); };
+  $("linkSlot").appendChild(link);
+
+  // the Post button (a different element entirely in the changed variant)
+  let post;
+  if (changed) {
+    post = document.createElement("div");
+    post.className = "btn-pub"; post.setAttribute("role", "button"); post.setAttribute("aria-label", "Publish now"); post.textContent = "Publish now";
+    post.setAttribute("aria-disabled", "true");
+  } else {
+    post = document.createElement("button");
+    post.className = "post"; post.setAttribute("data-e2e", "post_video_button"); post.textContent = "Post"; post.disabled = true;
+  }
+  post.id = "post";
+  $("postSlot").appendChild(post);
+  function enablePost() { if (changed) post.removeAttribute("aria-disabled"); else post.disabled = false; }
+  post.addEventListener("click", () => {
+    if (post.disabled || post.getAttribute("aria-disabled") === "true") return;
+    if (document.getElementById("captcha")) return;
+    $("confirm").hidden = false; ev("post pressed");
+  });
+  $("cancel").onclick = () => { $("confirm").hidden = true; };
+  $("postNow").onclick = () => {
+    $("confirm").hidden = true;
+    M.caption = $("caption").innerText.replace(/\s+/g, " ").trim();
+    M.posted = true; ev("posted");
+    $("form").hidden = true; $("done").hidden = false;
+    history.pushState({}, "", "/tiktokstudio/content");
+  };
+
+  // the product dialog
+  let type = null, picked = null;
+  $("optProducts").onclick = () => { type = "products"; $("optProducts").setAttribute("aria-selected", "true"); $("optOther").removeAttribute("aria-selected"); $("next1").disabled = false; };
+  $("optOther").onclick = () => { type = "other"; $("optOther").setAttribute("aria-selected", "true"); $("optProducts").removeAttribute("aria-selected"); $("next1").disabled = false; };
+  $("next1").onclick = () => { if (type !== "products") return; $("step1").hidden = true; $("step2").hidden = false; renderRows(""); };
+  function renderRows(term) {
+    const box = $("rows"); box.innerHTML = "";
+    const words = term.toLowerCase().split(/\s+/).filter(Boolean);
+    for (const p of PRODUCTS.filter((p) => !words.length || words.some((w) => p.toLowerCase().includes(w)))) {
+      const r = document.createElement("div");
+      r.setAttribute("role", "radio"); r.textContent = p;
+      r.onclick = () => { picked = p; for (const o of box.children) o.setAttribute("aria-checked", String(o === r)); $("next2").disabled = false; };
+      box.appendChild(r);
+    }
+  }
+  $("search").addEventListener("input", () => renderRows($("search").value));
+  $("next2").onclick = () => { if (!picked) return; $("step2").hidden = true; $("step3").hidden = false; $("pname").value = picked; };
+  $("addBtn").onclick = () => { M.product = picked; $("dlg").hidden = true; $("productChip").innerHTML = `<span class="chip">Product: ${picked}</span>`; ev("product " + picked); };
+</script>
+</body>
+</html>

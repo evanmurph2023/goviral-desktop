@@ -1,0 +1,110 @@
+// One post from start to finish, the way the app asks for it: download the finished export to a
+// temp file, open (or reuse) the TikTok window, drive TikTok with the engine, clean up. One post
+// at a time; the app queues the rest. Used by the IPC bridge (index.js) and by the harness
+// (scripts/tiktok-harness.cjs), which points it at a local mock of TikTok Studio.
+"use strict";
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { Readable } = require("stream");
+const { pipeline } = require("stream/promises");
+const { createTikTokWindow } = require("./window");
+const { CdpPage } = require("./page");
+const { createEngine } = require("./engine");
+const { STEP_WORDS, safeFileName, TIKTOK_UPLOAD_URL } = require("./rules");
+
+const MAX_BYTES = 4 * 1024 ** 3;
+
+// The platform's AI fallback, called with the app's own sign-in (the default session's cookie).
+function makeGrootClient({ fetchImpl, origin }) {
+  return {
+    async nextAction(body) {
+      try {
+        const res = await fetchImpl(`${origin}/api/groot-post/next-action`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body) });
+        const j = await res.json().catch(() => null);
+        if (res.ok && j && j.ok && j.action) return { ok: true, action: j.action };
+        return { ok: false, error: (j && typeof j.error === "string" && j.error) || `Groot couldn't see the page (${res.status}).` };
+      } catch { return { ok: false, error: "Groot couldn't reach GoViral. Check your internet." }; }
+    },
+  };
+}
+
+async function downloadTo(fetchImpl, url, dir, name, signal) {
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, safeFileName(name));
+  const res = await fetchImpl(url, { signal });
+  if (!res.ok || !res.body) throw new Error(`The video didn't download (${res.status}).`);
+  const len = Number(res.headers.get("content-length") || 0);
+  if (len > MAX_BYTES) throw new Error("That video is too big to post.");
+  await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(file), { signal });
+  const size = fs.statSync(file).size;
+  if (size < 1000) throw new Error("The video didn't download.");
+  return file;
+}
+
+function createPoster({ electron, log = () => {}, groot, fetchVideo, uploadUrl = TIKTOK_UPLOAD_URL, allowLocal = false, pace = 1, show = true, timeouts, icon, userAgent, tempRoot = path.join(os.tmpdir(), "goviral-groot") }) {
+  let tw = null;          // the TikTok window, kept between posts of a run
+  let current = null;     // { abort, handedBack }
+
+  const ensureWindow = () => {
+    if (tw && !tw.isClosed()) return tw;
+    tw = createTikTokWindow({ electron, allowLocal, show, log, icon, userAgent });
+    tw.onStop(() => { if (current) current.abort.abort(); });
+    tw.onNext(() => { if (current) current.handedBack = true; });
+    return tw;
+  };
+
+  async function post(job, onProgress = () => {}) {
+    if (current) return { status: "failed", error: "Groot is already posting. One at a time.", code: "busy" };
+    const abort = new AbortController();
+    current = { abort, handedBack: false };
+    const me = current;
+    const dir = path.join(tempRoot, `${job.postId}-${Date.now()}`);
+    const w = ensureWindow();
+    const title = `Groot is posting "${job.name}"`;
+    const report = (p) => {
+      const evt = { status: p.status || "posting", step: p.step || null, message: p.message || "", reason: p.reason || null, ai: !!p.ai };
+      w.setStatus({ title, line: evt.message, status: evt.status });
+      try { onProgress(evt); } catch { /* the app's problem */ }
+    };
+    if (show) w.focus();
+    let page = null;
+    try {
+      report({ step: "download", message: "Getting your video" });
+      const filePath = await downloadTo(fetchVideo, job.videoUrl, dir, job.name, abort.signal);
+      page = new CdpPage(w.contents, { pace, signal: abort.signal, log });
+      page.attach();
+      const engine = createEngine({ page, groot, report, uploadUrl, timeouts, log, handedBack: () => me.handedBack });
+      const r = await engine.run({ ...job, filePath });
+      return r;
+    } catch (e) {
+      if (abort.signal.aborted) { report({ status: "stopped", message: "Stopped" }); return { status: "stopped" }; }
+      const error = (e && e.message) || "Something went wrong.";
+      log("tiktok post error", e);
+      report({ status: "failed", message: error });
+      return { status: "failed", error };
+    } finally {
+      if (page) page.detach();
+      fs.rm(dir, { recursive: true, force: true }, () => {});
+      current = null;
+    }
+  }
+
+  return {
+    post,
+    stop() { if (current) current.abort.abort(); },
+    busy: () => !!current,
+    // Open the window on TikTok Studio so the creator can log in before the first post.
+    openWindow() {
+      const w = ensureWindow();
+      w.setStatus({ title: "TikTok", line: "Log in to TikTok here once. Groot uses this window to post.", status: "ready" });
+      if (!current) w.contents.loadURL(uploadUrl).catch(() => {});
+      w.focus();
+    },
+    window: () => tw,
+    close() { if (tw) tw.close(); tw = null; },
+  };
+}
+
+module.exports = { createPoster, makeGrootClient, downloadTo, STEP_WORDS };
