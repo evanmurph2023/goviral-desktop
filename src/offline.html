@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src https:" />
+  <title>GoViral</title>
+  <style>
+    :root { color-scheme: dark; --bg: #09090b; --text: #fafafa; --dim: rgba(250,250,250,0.6); --faint: rgba(250,250,250,0.38); --red: #FF3636; --red-hover: #ff4d4d; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    .strip { position: fixed; top: 0; left: 0; right: 0; height: 32px; -webkit-app-region: drag; app-region: drag; }
+    main { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px 24px; text-align: center; background: radial-gradient(50% 45% at 50% 38%, rgba(255,54,54,0.14), transparent 70%); }
+    img { width: 84px; height: 84px; border-radius: 20px; box-shadow: 0 18px 50px -12px rgba(255,54,54,0.45); }
+    h1 { margin: 28px 0 0; font-size: 30px; font-weight: 800; letter-spacing: -0.03em; }
+    p { margin: 12px 0 0; max-width: 26rem; font-size: 15.5px; line-height: 1.55; color: var(--dim); text-wrap: balance; }
+    button { margin-top: 30px; height: 48px; padding: 0 32px; border: 0; border-radius: 999px; background: var(--red); color: #fff; font: inherit; font-size: 16px; font-weight: 650; cursor: pointer; box-shadow: 0 10px 34px -10px rgba(255,54,54,0.7); }
+    button:hover { background: var(--red-hover); }
+    button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+    button[disabled] { opacity: 0.6; cursor: default; }
+    .status { margin-top: 16px; min-height: 18px; font-size: 13px; color: var(--faint); }
+  </style>
+</head>
+<body>
+  <div class="strip" aria-hidden="true"></div>
+  <main>
+    <img src="../assets/logo.png" alt="" />
+    <h1>You're offline</h1>
+    <p>GoViral couldn't reach the internet. Your videos on this computer are safe. It reconnects on its own as soon as you're back online.</p>
+    <button id="retry" type="button">Try again</button>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+  </main>
+  <script>
+    (function () {
+      var q = new URLSearchParams(location.search);
+      var home = q.get("home") || "https://app.govirall.now/desktop";
+      var origin;
+      try { origin = new URL(home).origin; } catch (e) { origin = "https://app.govirall.now"; }
+      var target = q.get("retry") || home;
+      try { if (new URL(target).origin !== origin) target = home; } catch (e) { target = home; }
+
+      var btn = document.getElementById("retry");
+      var status = document.getElementById("status");
+      var busy = false;
+
+      function go() { location.href = target; }
+
+      // Reachable? A no-cors request resolves (opaque) if the site answers at all.
+      function attempt(manual) {
+        if (busy) return;
+        busy = true;
+        if (manual) { btn.disabled = true; status.textContent = "Connecting…"; }
+        var done = false;
+        var timer = setTimeout(function () { if (!done) { done = true; fail(manual); } }, 8000);
+        fetch(home, { mode: "no-cors", cache: "no-store" }).then(function () {
+          if (done) return; done = true; clearTimeout(timer); status.textContent = "Back online. Opening GoViral…"; go();
+        }, function () {
+          if (done) return; done = true; clearTimeout(timer); fail(manual);
+        });
+      }
+      function fail(manual) {
+        busy = false;
+        btn.disabled = false;
+        status.textContent = manual ? "Still can't connect. Check your Wi-Fi and try again." : "";
+      }
+
+      btn.addEventListener("click", function () { attempt(true); });
+      window.addEventListener("online", function () { attempt(false); });
+      setInterval(function () { if (navigator.onLine) attempt(false); }, 15000);
+    })();
+  </script>
+</body>
+</html>

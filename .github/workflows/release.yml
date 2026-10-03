@@ -1,0 +1,176 @@
+# Builds GoViral for Windows and Mac and publishes them to GitHub Releases.
+#
+#   Release:   bump "version" in package.json, commit, then  git tag v1.0.1 && git push --tags
+#              -> a draft release v1.0.1 is made, Windows (windows-latest) and Mac (macos-latest)
+#                 build and upload into it, and it goes public only when both have finished.
+#                 Installed apps see it within 4 hours (or Help > Check for updates).
+#   Test run:  Actions > Release > Run workflow: builds both, uploads them as workflow artifacts,
+#              publishes nothing.
+#
+# Signing switches on by itself when its secrets exist (Settings > Secrets and variables > Actions);
+# with none set, the builds are simply unsigned. See README.md for what each one is.
+#   Windows, Azure Trusted Signing: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
+#                                   AZURE_SIGN_ENDPOINT, AZURE_SIGN_ACCOUNT, AZURE_SIGN_PROFILE, WIN_PUBLISHER_NAME
+#   Windows, a .pfx instead:        WIN_CSC_LINK (base64 of the .pfx), WIN_CSC_KEY_PASSWORD, WIN_PUBLISHER_NAME
+#   Mac:                            MAC_CSC_LINK (base64 of the Developer ID Application .p12), MAC_CSC_KEY_PASSWORD,
+#                                   APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches package.json
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $v. Bump the version, commit, and tag v$v."
+            exit 1
+          fi
+      - name: Create the draft release (if it is not there yet)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
+              --title "GoViral ${GITHUB_REF_NAME#v}" \
+              --notes "GoViral for Windows and Mac. Download GoViral-Setup-${GITHUB_REF_NAME#v}-x64.exe for Windows (GoViral-Setup-${GITHUB_REF_NAME#v}-arm64.exe on an ARM PC) or GoViral-${GITHUB_REF_NAME#v}.dmg for Mac."
+          fi
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: [draft]
+    # The draft job is skipped on a manual run; build anyway.
+    if: always() && (needs.draft.result == 'success' || needs.draft.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            args: --win nsis --x64 --arm64
+          - name: Mac
+            os: macos-latest
+            args: --mac
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Checks
+        run: node scripts/check.cjs
+
+      # Only the secrets that are really there reach the build (an absent secret is an empty
+      # string, and half a signing setup fails the build instead of skipping).
+      - name: Signing setup
+        shell: bash
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGN_ENDPOINT: ${{ secrets.AZURE_SIGN_ENDPOINT }}
+          AZURE_SIGN_ACCOUNT: ${{ secrets.AZURE_SIGN_ACCOUNT }}
+          AZURE_SIGN_PROFILE: ${{ secrets.AZURE_SIGN_PROFILE }}
+          WIN_PUBLISHER_NAME: ${{ secrets.WIN_PUBLISHER_NAME }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          put() { # name value -> $GITHUB_ENV, safe for long or multi-line values
+            local d="EOF_${RANDOM}${RANDOM}${RANDOM}"
+            { echo "$1<<$d"; echo "$2"; echo "$d"; } >> "$GITHUB_ENV"
+          }
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            if [ -n "$AZURE_TENANT_ID" ] && [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ] && [ -n "$AZURE_SIGN_ENDPOINT" ] && [ -n "$AZURE_SIGN_ACCOUNT" ] && [ -n "$AZURE_SIGN_PROFILE" ] && [ -n "$WIN_PUBLISHER_NAME" ]; then
+              echo "Windows: signing with Azure Trusted Signing"
+              for k in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_SIGN_ENDPOINT AZURE_SIGN_ACCOUNT AZURE_SIGN_PROFILE WIN_PUBLISHER_NAME; do put "$k" "${!k}"; done
+            elif [ -n "$WIN_CSC_LINK" ]; then
+              echo "Windows: signing with the .pfx certificate"
+              put WIN_CSC_LINK "$WIN_CSC_LINK"
+              put WIN_CSC_KEY_PASSWORD "$WIN_CSC_KEY_PASSWORD"
+              if [ -n "$WIN_PUBLISHER_NAME" ]; then put WIN_PUBLISHER_NAME "$WIN_PUBLISHER_NAME"; fi
+            else
+              echo "::warning::Windows: no signing secrets, building UNSIGNED (SmartScreen will warn people)"
+              put CSC_IDENTITY_AUTO_DISCOVERY false
+            fi
+          else
+            if [ -n "$MAC_CSC_LINK" ]; then
+              echo "Mac: signing with the Developer ID Application certificate"
+              put CSC_LINK "$MAC_CSC_LINK"
+              put CSC_KEY_PASSWORD "$MAC_CSC_KEY_PASSWORD"
+              if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+                echo "Mac: notarizing"
+                put APPLE_ID "$APPLE_ID"
+                put APPLE_APP_SPECIFIC_PASSWORD "$APPLE_APP_SPECIFIC_PASSWORD"
+                put APPLE_TEAM_ID "$APPLE_TEAM_ID"
+              else
+                echo "::warning::Mac: signed but NOT notarized (APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID missing); Gatekeeper will block it"
+              fi
+            else
+              echo "::warning::Mac: no certificate, building ad-hoc signed (people must right-click > Open, and auto-update will not work)"
+              put CSC_IDENTITY_AUTO_DISCOVERY false
+            fi
+          fi
+
+      - name: Build and publish (tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --config electron-builder.config.js ${{ matrix.args }} --publish always
+
+      - name: Build only (manual run)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        shell: bash
+        run: npx electron-builder --config electron-builder.config.js ${{ matrix.args }} --publish never
+
+      - name: Keep the files on the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoViral-${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+            dist/*.blockmap
+            dist/latest*.yml
+
+  publish:
+    name: Publish release
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Make the release public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
