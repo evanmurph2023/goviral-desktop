@@ -122,9 +122,11 @@ jobs:
             fi
           else
             if [ -n "$MAC_CSC_LINK" ]; then
+              # The certificate goes into its own keychain in the next step (which sets CSC_NAME and
+              # CSC_KEYCHAIN), not through CSC_LINK: electron-builder 26's own import runs
+              # set-key-partition-list with the .p12 password instead of its keychain's password,
+              # and fails with "SecKeychainUnlock: The user name or passphrase you entered is not correct".
               echo "Mac: signing with the Developer ID Application certificate"
-              put CSC_LINK "$MAC_CSC_LINK"
-              put CSC_KEY_PASSWORD "$MAC_CSC_KEY_PASSWORD"
               if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
                 echo "Mac: notarizing"
                 put APPLE_ID "$APPLE_ID"
@@ -138,6 +140,48 @@ jobs:
               put CSC_IDENTITY_AUTO_DISCOVERY false
             fi
           fi
+
+      # Mac: the Developer ID certificate goes into a throwaway keychain with a random password that
+      # codesign may use without a prompt; electron-builder then finds the identity there by name.
+      - name: Mac signing keychain
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MAC_CSC_LINK" ]; then echo "No Mac certificate, skipping"; exit 0; fi
+          KEYCHAIN="$RUNNER_TEMP/goviral-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          P12="$RUNNER_TEMP/goviral-signing.p12"
+          printf '%s' "$MAC_CSC_LINK" | tr -d ' \r\n' | base64 --decode > "$P12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$P12" -k "$KEYCHAIN" -f pkcs12 -P "$MAC_CSC_KEY_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productbuild
+          rm -f "$P12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # First in the search list, with the existing keychains (login, system) kept behind it.
+          existing=()
+          while IFS= read -r k; do
+            k="${k#"${k%%[![:space:]]*}"}"; k="${k#\"}"; k="${k%\"}"
+            [ -n "$k" ] && existing+=("$k")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KEYCHAIN" "${existing[@]}"
+          security list-keychains -d user
+          security find-identity -v -p codesigning "$KEYCHAIN"
+          name="$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"Developer ID Application: \(.*\)"$/\1/p' | head -n 1)"
+          if [ -z "$name" ]; then
+            echo "::error::No valid Developer ID Application identity in the imported certificate"
+            exit 1
+          fi
+          echo "Mac: signing as Developer ID Application: $name"
+          # electron-builder wants the name without the "Developer ID Application: " prefix.
+          echo "CSC_NAME=$name" >> "$GITHUB_ENV"
+          echo "CSC_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
 
       - name: Build and publish (tag)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -163,6 +207,14 @@ jobs:
             dist/*.zip
             dist/*.blockmap
             dist/latest*.yml
+
+      - name: Remove the Mac signing keychain
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/goviral-signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/goviral-signing.keychain-db" || true
+          fi
 
   publish:
     name: Publish release
