@@ -64,11 +64,15 @@ jobs:
           - name: Windows
             os: windows-latest
             args: --win nsis --x64 --arm64
+            timeout: 60
+          # Apple's notarization usually takes minutes, but a new team's first submissions can sit
+          # "In Progress" for hours, and electron-builder waits for it.
           - name: Mac
             os: macos-latest
             args: --mac
+            timeout: 300
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@v4
 
@@ -179,16 +183,50 @@ jobs:
             exit 1
           fi
           echo "Mac: signing as Developer ID Application: $name"
+          # Prove codesign can use the key without a prompt (a prompt would hang the build until the
+          # job times out) and that Apple's timestamp server answers: sign a copy of a tiny binary.
+          cp /usr/bin/true "$RUNNER_TEMP/codesign-test"
+          if ! perl -e 'alarm shift; exec @ARGV' 120 codesign --force --options runtime --timestamp \
+              --keychain "$KEYCHAIN" --sign "Developer ID Application: $name" "$RUNNER_TEMP/codesign-test"; then
+            echo "::error::codesign could not sign a test file with the imported certificate (or hung for 2 minutes)"
+            exit 1
+          fi
+          codesign --verify --strict "$RUNNER_TEMP/codesign-test"
+          rm -f "$RUNNER_TEMP/codesign-test"
+          echo "::notice title=Mac signing::codesign works with Developer ID Application: $name"
           # electron-builder wants the name without the "Developer ID Application: " prefix.
           echo "CSC_NAME=$name" >> "$GITHUB_ENV"
           echo "CSC_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+      # Mac: check the Apple ID can reach the notary service before a long build, and put Apple's
+      # recent submissions (date, status, id; nothing secret) on the run's summary page.
+      - name: Mac notarization check
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -z "${APPLE_ID:-}" ]; then echo "Not notarizing, skipping"; exit 0; fi
+          if ! out="$(perl -e 'alarm shift; exec @ARGV' 180 xcrun notarytool history --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --output-format json)"; then
+            echo "::error::notarytool could not sign in to Apple with APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID"
+            exit 1
+          fi
+          printf '%s' "$out" | node -e '
+            let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+              const h = (JSON.parse(s).history || []);
+              const counts = {};
+              for (const x of h) counts[x.status] = (counts[x.status] || 0) + 1;
+              console.log(`::notice title=Notary history::${h.length} earlier submission(s): ${JSON.stringify(counts)}`);
+              for (const x of h.slice(0, 5)) console.log(`::notice title=Notary submission::${x.createdDate} ${x.status} ${x.id}`);
+            });'
 
       - name: Build and publish (tag)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --config electron-builder.config.js ${{ matrix.args }} --publish always
+          # @electron/notarize's progress lines (zipping, uploading, accepted), not its raw commands.
+          DEBUG: electron-notarize,electron-notarize:notarytool,electron-notarize:staple
+        run: npx electron-builder --config electron-builder.config.js ${{ matrix.args }} --publish always 2>&1 | node scripts/ci-progress.cjs
 
       - name: Build only (manual run)
         if: "!startsWith(github.ref, 'refs/tags/v')"
