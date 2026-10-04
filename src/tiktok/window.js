@@ -66,6 +66,9 @@ function createTikTokWindow({ electron, allowLocal = false, show = true, log = (
     allowLocal, log,
     popupOptions: () => ({ width: 520, height: 720, autoHideMenuBar: true, backgroundColor: BG, webPreferences: secure({ partition: PARTITION }) }),
   });
+  // A video that stopped half way (a product not in the showcase) leaves a half-filled upload page:
+  // TikTok's "leave this page?" must not hold the next video back. Groot moves on; nothing was posted.
+  tiktok.webContents.on("will-prevent-unload", (e) => { log("tiktok unload prompt skipped"); e.preventDefault(); });
   // The bar's own page never goes anywhere.
   bar.webContents.on("will-navigate", (d) => d.preventDefault());
   bar.webContents.setWindowOpenHandler(() => ({ action: "deny" }));

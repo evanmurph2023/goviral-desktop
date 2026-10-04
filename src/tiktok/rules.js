@@ -2,13 +2,17 @@
 // prove them with plain Node.
 //   - what the app may ask for (validatePostRequest) and who may ask (isAllowedCaller)
 //   - which addresses the TikTok window may show (isTikTokUrl, isLoginProviderUrl)
-//   - where a finished export may be downloaded from (isVideoUrl)
+//   - where a video may come from (parseSource: a GoViral export, a file the creator chose, Drive)
 //   - the scripted steps for one post (planSteps) and the selectors they try (TARGETS)
+//   - the product in the showcase (searchTerms, pickProduct) and the link name (cleanProductName)
 //   - the AI fallback's actions, checked again here before anything runs (validateAction)
 //   - human pacing (delay)
 "use strict";
 
-const TIKTOK_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload";
+// TikTok Studio, not tiktok.com/upload (Drew, 2026-10-04: the real flow): Upload → Videos lives
+// at /tiktokstudio/upload.
+const TIKTOK_STUDIO_URL = "https://www.tiktok.com/tiktokstudio";
+const TIKTOK_UPLOAD_URL = `${TIKTOK_STUDIO_URL}/upload`;
 const MODES = ["auto", "manual"];
 
 // ---- callers and inputs ----------------------------------------------------------------------
@@ -51,87 +55,182 @@ function isLoginProviderUrl(url) {
 const str = (v, max) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "");
 const HASHTAG = /^[\p{L}\p{N}_]{1,40}$/u;
 
+// Where the video comes from:
+//   { kind: "url", url }      a finished GoViral export (Blob, the worker, the site): downloaded
+//   { kind: "file", fileId }  a video on this computer the creator chose (a folder they picked, or
+//                             files they dropped): an opaque id from files.js, never a path
+//   { kind: "drive", fileId } a video in the creator's own Google Drive (drive.js downloads it)
+// The first shape the app sent, { videoUrl }, is still a url source.
+const FILE_ID = /^f_[A-Za-z0-9_-]{16,64}$/;
+const DRIVE_ID = /^[A-Za-z0-9_-]{10,200}$/;
+function parseSource(raw, { allowLocal = false } = {}) {
+  const src = raw.source && typeof raw.source === "object" && !Array.isArray(raw.source) ? raw.source : typeof raw.videoUrl === "string" ? { kind: "url", url: raw.videoUrl } : null;
+  if (!src) return { error: "Which video?" };
+  if (src.kind === "url") {
+    const url = typeof src.url === "string" ? src.url.trim() : "";
+    return isVideoUrl(url, { allowLocal }) ? { source: { kind: "url", url } } : { error: "That video isn't a GoViral export." };
+  }
+  if (src.kind === "file") return typeof src.fileId === "string" && FILE_ID.test(src.fileId) ? { source: { kind: "file", fileId: src.fileId } } : { error: "That isn't a video you picked." };
+  if (src.kind === "drive") return typeof src.fileId === "string" && DRIVE_ID.test(src.fileId) ? { source: { kind: "drive", fileId: src.fileId } } : { error: "That isn't a Google Drive video." };
+  return { error: "Which video?" };
+}
+
 // The request the app sends for one video. Everything is checked here, in the main process: the
 // page can be anything, so nothing it sends is trusted as-is.
 function validatePostRequest(raw, { allowLocal = false } = {}) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "Send one post." };
   const postId = str(raw.postId, 64);
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(postId)) return { ok: false, error: "Bad post id." };
-  const videoUrl = typeof raw.videoUrl === "string" ? raw.videoUrl.trim() : "";
-  if (!isVideoUrl(videoUrl, { allowLocal })) return { ok: false, error: "That video isn't a GoViral export." };
+  const src = parseSource(raw, { allowLocal });
+  if (src.error) return { ok: false, error: src.error };
   const mode = MODES.includes(raw.mode) ? raw.mode : null;
   if (!mode) return { ok: false, error: "Pick Auto or Manual." };
   const caption = str(raw.caption, 300).replace(/\s*[—–]\s*/g, ", ");
   const hashtags = Array.isArray(raw.hashtags) ? raw.hashtags.map((h) => str(h, 41).replace(/^#/, "")).filter((h) => HASHTAG.test(h)).slice(0, 5) : [];
   const product = raw.product === null || raw.product === undefined ? null : str(raw.product, 80) || null;
   const name = str(raw.name, 120) || "GoViral video";
-  return { ok: true, value: { postId, videoUrl, mode, caption, hashtags, product, name } };
+  const source = src.source;
+  return { ok: true, value: { postId, source, videoUrl: source.kind === "url" ? source.url : null, mode, caption, hashtags, product, name } };
 }
 
-// The text that goes into TikTok's caption box: the caption, then the hashtags. The platform builds
-// the same string (src/lib/groot-post-db.ts takeAiStep), which is the only text the AI may type.
+// The text that goes into TikTok's description box: the caption, then the hashtags ("comfort
+// weekend slipper #slippers #comfort"). The platform builds the same string (src/lib/groot-post-db.ts
+// takeAiStep), which is the only text the AI may type.
 function captionText(caption, hashtags) {
   return [caption || "", (hashtags || []).map((h) => `#${h}`).join(" ")].filter(Boolean).join(" ").trim();
 }
 
-// A file name for the downloaded export (TikTok shows it while uploading).
+// A file name for a downloaded video (TikTok shows it while uploading).
 function safeFileName(name) {
-  const base = String(name || "GoViral video").replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "GoViral video";
+  const base = String(name || "GoViral video").replace(/\.(mp4|mov|m4v|webm)$/i, "").replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "GoViral video";
   return `${base}.mp4`;
+}
+
+// ---- the product in the showcase ------------------------------------------------------------------
+// The product is the creator's words ("Comfort slippers"); the showcase has TikTok's title
+// ("Comfort Weekend Slipper"). Words are compared, not strings: lower case, accents off, simple
+// plurals folded (slippers = slipper), filler words ignored. A row is the product when it has at
+// least 3 in 4 of the creator's words; of several, the most words matched, then the shortest
+// title. Nothing good enough = not in the showcase: Groot never tags a different product.
+const FILLER = new Set(["the", "a", "an", "and", "or", "for", "with", "of", "in", "on", "to", "my", "by", "from", "new"]);
+function stem(w) {
+  if (w.length > 4 && w.endsWith("ies")) return `${w.slice(0, -3)}y`;
+  if (w.length > 4 && /(ches|shes|xes|sses|zes)$/.test(w)) return w.slice(0, -2);
+  if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") && !w.endsWith("us")) return w.slice(0, -1);
+  return w;
+}
+function productWords(text) {
+  return String(text || "").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").split(/[^\p{L}\p{N}]+/u).filter((w) => w && !FILLER.has(w)).map(stem);
+}
+function productScore(want, have) {
+  const w = [...new Set(productWords(want))];
+  if (!w.length) return 0;
+  const h = new Set(productWords(have));
+  return w.filter((x) => h.has(x)).length / w.length;
+}
+const PICK_AT = 0.75;
+function pickProduct(want, rows) {
+  let best = null;
+  for (const r of rows || []) {
+    const score = productScore(want, r.text);
+    if (score < PICK_AT) continue;
+    const extra = productWords(r.text).length;
+    if (!best || score > best.score || (score === best.score && extra < best.extra)) best = { ...r, score, extra };
+  }
+  return best;
+}
+// What to type into the showcase search: the product as the creator said it, then (TikTok's
+// search wants every word as typed, so "slippers" misses "Slipper") the first word alone.
+function searchTerms(product) {
+  const full = str(product, 80);
+  const words = full.split(/\s+/).filter((w) => w.length > 1 && !FILLER.has(w.toLowerCase()));
+  const out = [full];
+  if (words.length > 1) out.push(words[0]);
+  return out.filter((t, i) => t && out.indexOf(t) === i);
+}
+
+// The product link name: Groot never renames it. Only when TikTok says it has characters it
+// won't take, they go: level 1 = emoji and symbols (✨ ★ ™ | / # @ …), level 2 = everything but
+// letters, numbers and spaces. Returns the name unchanged when there is nothing to take out.
+function cleanProductName(name, level = 1) {
+  const t = String(name || "");
+  const out = level >= 2
+    ? t.replace(/[^\p{L}\p{N} ]+/gu, " ")
+    : t.replace(/[\p{Extended_Pictographic}\p{S}\p{Cc}\p{Cf}|/\\<>{}[\]~^*#@`"]+/gu, " ");
+  return out.replace(/\s+/g, " ").trim();
 }
 
 // ---- the scripted steps -------------------------------------------------------------------------
 // Each target is a list of ways to find it, tried in order. { css } = a selector; { text } = an
-// element whose own words match (a regex source, case-insensitive), within `within` (a selector);
-// { best: css } = the element among these whose words best match the product name. `hidden: true`
-// finds elements that are not visible (TikTok hides its file input). These are best guesses at
-// TikTok Studio's upload page; when one misses, the step asks Groot (the AI fallback).
+// element whose own words match (a regex source, case-insensitive), within `within` (a selector).
+// `hidden: true` finds elements that are not visible (TikTok hides its file input). For lists
+// (the product rows) page.rows() returns every match with its words. These follow Drew's walk
+// through TikTok Studio (2026-10-04); when one misses, the step asks Groot (the AI fallback).
 const BTN = "button, [role=button], [role=menuitem], [role=option], [role=tab], a, label, div[tabindex], span[tabindex]";
+const DLG = "[role=dialog]";
+const DLG_BTN = `${DLG} button, ${DLG} [role=button]`;
 const TARGETS = {
+  // Upload → Videos, when the page did not open on the upload area
+  uploadNav: [{ css: '[data-e2e="upload_nav"]' }, { text: "^upload$", within: "nav a, nav button, nav [role=button], aside a, aside button, a, button" }],
+  videosTab: [{ css: '[data-e2e="upload_videos_tab"]' }, { text: "^videos?$", within: "[role=tab], button, a" }],
   fileInput: [{ css: 'input[type="file"][accept*="video"]', hidden: true }, { css: 'input[type="file"]', hidden: true }],
   uploaded: [{ css: '[data-e2e="upload_status_text"][data-status="success"]' }, { text: "^(uploaded|upload complete|100%)$", within: "div, span, p" }],
   uploadFailed: [{ text: "^(upload failed|couldn.t upload|upload error)", within: "div, span, p" }],
   captionBox: [{ css: '[data-e2e="caption_container"] [contenteditable="true"]' }, { css: '.public-DraftEditor-content[contenteditable="true"]' }, { css: 'div[contenteditable="true"][role="combobox"]' }, { css: 'div[contenteditable="true"]' }],
+  // Add link → Products → Next → search → pick → Next → (the name) → Add
   addLink: [{ css: '[data-e2e="add_link_button"]' }, { text: "^\\+?\\s*add link$", within: BTN }],
-  productsOption: [{ css: '[data-e2e="link_type_products"]' }, { text: "^products?$", within: BTN }],
-  linkNext: [{ text: "^next$", within: '[role=dialog] button, [role=dialog] [role=button]' }],
-  productSearch: [{ css: 'input[placeholder*="Search product" i]' }, { css: '[role=dialog] input[type="search"]' }, { css: '[role=dialog] input[placeholder*="Search" i]' }],
-  productRows: [{ best: '[role=dialog] [role=radio], [role=dialog] [role=option], [role=dialog] tr, [role=dialog] li, [role=dialog] label' }],
-  productConfirm: [{ text: "^(next|add|confirm|save|done)$", within: '[role=dialog] button, [role=dialog] [role=button]' }],
-  dialog: [{ css: '[role=dialog]' }],
-  postButton: [{ css: 'button[data-e2e="post_video_button"]' }, { text: "^post$", within: "button" }],
-  postNow: [{ text: "^post now$", within: BTN }],
-  posted: [{ text: "(your video (has been|is being|was) (posted|published|uploaded)|video published|manage your posts)", within: "div, span, p, h1, h2, h3" }],
+  productsOption: [{ css: '[data-e2e="link_type_products"]' }, { text: "^products?$", within: `${DLG} [role=option], ${DLG} [role=tab], ${DLG} [role=radio], ${DLG} button, ${DLG} label, ${DLG} li` }],
+  linkNext: [{ text: "^next$", within: DLG_BTN }],
+  productSearch: [{ css: 'input[placeholder*="Search product" i]' }, { css: `${DLG} input[type="search"]` }, { css: `${DLG} input[placeholder*="Search" i]` }],
+  productRows: [{ css: `${DLG} [role=radio], ${DLG} [role=option], ${DLG} tbody tr, ${DLG} li` }],
+  productSelected: [{ css: `${DLG} [role=radio][aria-checked=true], ${DLG} [role=option][aria-selected=true], ${DLG} input:checked` }],
+  productNoResults: [{ text: "(no (products|results)( found)?|couldn.t find (any|that)|nothing found)", within: `${DLG} div, ${DLG} p, ${DLG} span` }],
+  productNext: [{ text: "^next$", within: DLG_BTN }],
+  productNameInput: [{ css: `${DLG} input[name="productName"]` }, { css: `${DLG} input[placeholder*="name" i]` }, { css: `${DLG} input[maxlength]:not([type=search])` }],
+  productNameError: [{ text: "(invalid|unsupported|special) characters?|characters? (that )?(are|is) not (allowed|supported)|can.t (contain|include)", within: `${DLG} div, ${DLG} p, ${DLG} span` }],
+  productAdd: [{ text: "^add$", within: DLG_BTN }],
+  dialog: [{ css: DLG }],
+  postButton: [{ css: 'button[data-e2e="post_video_button"]' }, { text: "^post( now)?$", within: "button" }],
+  // a "Post now?" confirmation, only ever inside a dialog (never the page's own button twice)
+  postNowDialog: [{ text: "^post now$", within: DLG_BTN }],
+  posted: [{ text: "(everyone can see this|your video (has been|is being|was) (posted|published|uploaded)|video (posted|published)|manage your posts|high[- ]quality (version|upload))", within: "div, span, p, h1, h2, h3" }],
   captcha: [{ css: '#captcha-verify-image, .captcha_verify_container, .captcha-verify-container, [class*="captcha_verify"], [id*="captcha-verify"], iframe[src*="captcha"]' }, { text: "(drag the (slider|puzzle)|verify to continue|select 2 objects that are the same shape)", within: "div, span, p" }],
   login: [{ css: '[data-e2e="login-modal"], [data-e2e="login-title"]' }, { text: "^log in to tiktok$", within: "h1, h2, div, span" }],
 };
 
 // The steps of one post. Manual stops on the filled-in page (handoff) and watches for the creator's
-// own Post; Auto presses Post and confirms it went out. No product = no product steps.
+// own Post; Auto presses Post now and waits for TikTok's success notice. No product = no product
+// steps. Playlist and location are never touched: they stay empty.
+const PRODUCT_STEPS = ["product_open", "product_tab", "product_search", "product_pick", "product_next", "product_name", "product_add"];
 function planSteps({ mode, product }) {
   const steps = ["open", "upload", "wait_processed", "caption"];
-  if (product) steps.push("product_open", "product_tab", "product_search", "product_pick", "product_confirm");
+  if (product) steps.push(...PRODUCT_STEPS);
   if (mode === "manual") steps.push("handoff");
   else steps.push("post", "confirm_posted");
   return steps;
 }
 
-// Which steps may ask Groot (their goals are a fixed table on the platform, STEP_GOALS).
-const AI_STEPS = new Set(["upload", "wait_processed", "caption", "product_open", "product_tab", "product_search", "product_pick", "product_confirm", "post", "confirm_posted"]);
+// Which steps may ask Groot (their goals are a fixed table on the platform, STEP_GOALS). Never
+// product_pick by itself (the product must be the creator's: a row is checked against their words
+// even after the AI clicked it) and never product_name (the name is never rewritten by the AI).
+const AI_STEPS = new Set(["upload", "wait_processed", "caption", "product_open", "product_tab", "product_search", "product_pick", "product_next", "product_add", "post", "confirm_posted"]);
 const STEP_WORDS = {
   open: "Opening TikTok Studio",
   upload: "Uploading the video",
   wait_processed: "TikTok is processing the video",
-  caption: "Writing the caption",
-  product_open: "Tagging the product",
-  product_tab: "Tagging the product",
-  product_search: "Finding the product",
+  caption: "Writing the description",
+  product_open: "Adding the product link",
+  product_tab: "Adding the product link",
+  product_search: "Finding the product in your showcase",
   product_pick: "Picking the product",
-  product_confirm: "Adding the product",
+  product_next: "Picking the product",
+  product_name: "Checking the product name",
+  product_add: "Adding the product",
   handoff: "Ready for you to post",
   post: "Posting",
   confirm_posted: "Checking it posted",
 };
+const NOT_IN_SHOWCASE = "That product isn't in your TikTok Shop showcase";
 
 // ---- the AI fallback's actions, checked again on this side -----------------------------------
 const KEYS = ["Enter", "Tab", "Escape", "Backspace"];
@@ -166,7 +265,7 @@ function validateAction(a, view, values) {
 
 // ---- human pacing --------------------------------------------------------------------------------
 // Never an instant burst: a pause before every click, a key at a time in small chunks while typing.
-// `pace` scales everything (the harness runs at 0.2); `rand` is injectable for tests.
+// `pace` scales everything (the harness runs at 0.15); `rand` is injectable for tests.
 const DELAYS = { beforeClick: [350, 900], afterClick: [250, 700], keyChunk: [35, 120], betweenSteps: [600, 1400], poll: [900, 1300] };
 function delay(kind, pace = 1, rand = Math.random) {
   const [lo, hi] = DELAYS[kind] || [300, 600];
@@ -180,7 +279,8 @@ function chunks(text, rand = Math.random) {
 }
 
 module.exports = {
-  TIKTOK_UPLOAD_URL, TARGETS, AI_STEPS, STEP_WORDS, KEYS, MAX_AI_PER_STEP, MAX_AI_PER_POST, DELAYS,
-  isAllowedCaller, isVideoUrl, isTikTokUrl, isLoginProviderUrl, validatePostRequest, captionText, safeFileName,
+  TIKTOK_STUDIO_URL, TIKTOK_UPLOAD_URL, TARGETS, AI_STEPS, STEP_WORDS, PRODUCT_STEPS, KEYS, MAX_AI_PER_STEP, MAX_AI_PER_POST, DELAYS, NOT_IN_SHOWCASE, PICK_AT,
+  isAllowedCaller, isVideoUrl, isTikTokUrl, isLoginProviderUrl, parseSource, validatePostRequest, captionText, safeFileName,
+  productWords, productScore, pickProduct, searchTerms, cleanProductName,
   planSteps, validateAction, delay, chunks,
 };

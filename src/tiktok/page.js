@@ -62,6 +62,32 @@ const FIND = function (arg) {
   return null;
 };
 
+// Runs in the isolated world: every visible match of a list (the product rows), innermost first,
+// each with its words and whether it is the one selected. The choosing happens in Node
+// (rules.js pickProduct), never in the page.
+const ROWS = function (arg) {
+  const g = (window.__gv = window.__gv || { els: [] });
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    const s = getComputedStyle(el);
+    return s.visibility !== "hidden" && s.display !== "none" && Number(s.opacity) > 0.05;
+  };
+  for (const way of arg.ways) {
+    if (!way.css) continue;
+    const all = [...document.querySelectorAll(way.css)].filter((el) => el.tagName === "INPUT" || visible(el));
+    const inner = all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
+    if (!inner.length) continue;
+    return inner.slice(0, 60).map((el) => {
+      const row = el.tagName === "INPUT" ? el.closest("label, li, tr, [role=row], [role=option], [role=radio]") || el.parentElement || el : el;
+      g.els.push(row);
+      const selected = el.checked === true || el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true" || !!row.querySelector("input:checked");
+      return { ref: g.els.length - 1, text: (row.innerText || row.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 200), selected };
+    });
+  }
+  return [];
+};
+
 // Runs in the isolated world: what is on screen and can be pressed or typed into, numbered.
 const SNAPSHOT = function () {
   const g = (window.__gv = window.__gv || { els: [] });
@@ -158,6 +184,7 @@ class CdpPage {
   }
 
   find(ways, value) { return this.run(FIND, { ways, value: value || null }); }
+  rows(ways) { return this.run(ROWS, { ways }).then((r) => r || []); }
   snapshot() { return this.run(SNAPSHOT); }
   textOf(ref) { return this.run(TEXT_OF, { ref }); }
   focusedIsPassword() { return this.run(FOCUSED_IS_PASSWORD); }

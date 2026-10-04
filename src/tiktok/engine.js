@@ -1,32 +1,43 @@
 // One post, step by step: FAST SCRIPTED STEPS with an AI FALLBACK.
 //
-// Every step first tries its scripted way (rules.js TARGETS: TikTok Studio's known buttons and
-// boxes). When a step cannot find its target in time, or its check fails afterwards, the step asks
-// Groot (POST /api/groot-post/next-action): the page's visible elements and a screenshot go up,
-// ONE action comes back (click / type / press / scroll / wait / done / need_user), it is checked
-// again here (rules.js validateAction), done with human pacing, and the step checks again. At most
-// MAX_AI_PER_STEP tries a step and MAX_AI_PER_POST a post (the server caps it too).
+// The scripted steps follow Drew's own walk through TikTok Studio (2026-10-04):
+//   TikTok Studio → Upload → Videos (tiktok.com/tiktokstudio/upload) → the video into the upload
+//   area → the description (a short caption naming the product, then the hashtags) → no playlist,
+//   no location → Add link → Products → Next → search the showcase → select the product → Next →
+//   (the link name: never renamed; only characters TikTok refuses come out) → Add → Post now →
+//   TikTok's success notice ("Everyone can see this", "uploading a high-quality version").
+// A product that isn't in the showcase stops THAT video ("That product isn't in your TikTok Shop
+// showcase"); the app carries on with the others.
+//
+// Every step first tries its scripted way (rules.js TARGETS). When a step cannot find its target
+// in time, or its check fails afterwards, the step asks Groot (POST /api/groot-post/next-action):
+// the page's visible elements and a screenshot go up, ONE action comes back (click / type / press /
+// scroll / wait / done / need_user), it is checked again here (rules.js validateAction), done with
+// human pacing, and the step checks again. At most MAX_AI_PER_STEP tries a step and
+// MAX_AI_PER_POST a post (the server caps it too). The product is never the AI's choice: a row it
+// clicks must still match the creator's words (CHECK.product_pick).
 //
 // Blockers: a captcha or a login page pauses everything, says so in the window's bar and in the
 // app, and waits for the creator (Groot never solves a captcha and never types a password).
 //
 // Pure of Electron: `page` is a CdpPage (or a fake in a test), `groot` is the client for the
-// platform, `report` gets progress. Returns { status: posted | ready | failed | stopped, error }.
+// platform, `report` gets progress. Returns { status: posted | ready | failed | stopped, error, code }.
 "use strict";
 
-const { TARGETS, AI_STEPS, STEP_WORDS, MAX_AI_PER_STEP, MAX_AI_PER_POST, planSteps, validateAction, captionText, TIKTOK_UPLOAD_URL } = require("./rules");
+const { TARGETS, AI_STEPS, STEP_WORDS, MAX_AI_PER_STEP, MAX_AI_PER_POST, NOT_IN_SHOWCASE, planSteps, validateAction, captionText, pickProduct, searchTerms, cleanProductName, productScore, PICK_AT, TIKTOK_UPLOAD_URL } = require("./rules");
 
 class StepMissed extends Error {}
-class Failed extends Error {}
+class Failed extends Error { constructor(message, code) { super(message); this.code = code || null; } }
 
 const BLOCKER_WAIT_MS = 15 * 60 * 1000;
 const PROCESS_WAIT_MS = 15 * 60 * 1000;
 const HANDOFF_WATCH_MS = 30 * 60 * 1000;
 
 function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOAD_URL, timeouts = {}, log = () => {}, handedBack = () => false }) {
-  const T = { find: 12000, processed: PROCESS_WAIT_MS, posted: 60000, blocker: BLOCKER_WAIT_MS, handoff: HANDOFF_WATCH_MS, ...timeouts };
+  const T = { find: 12000, results: 6000, processed: PROCESS_WAIT_MS, posted: 60000, blocker: BLOCKER_WAIT_MS, handoff: HANDOFF_WATCH_MS, ...timeouts };
   let aiUsed = 0;
   let current = null;
+  const tried = new Set(); // the search terms typed into the showcase for this post
 
   const say = (step, message, status = "posting", extra = {}) => report({ step, message: message || STEP_WORDS[step] || "", status, ...extra });
 
@@ -42,6 +53,10 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     }
   }
   const visible = async (name, value) => !!(await page.find(TARGETS[name], value));
+  const onUploadPage = () => /tiktokstudio\/upload/.test(page.url());
+  // Posted = TikTok's content list, or its success notice with the Post button gone (the privacy
+  // setting can say "Everyone" before anything is posted, so the words alone never count).
+  const isPosted = async () => /tiktokstudio\/content/.test(page.url()) || ((await visible("posted")) && !(await visible("postButton")));
 
   // A captcha or a login page: the creator's turn. Polls until it is gone (or times out).
   async function blockers() {
@@ -60,7 +75,7 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     }
     say(current, "Thanks, carrying on.");
     // After a login TikTok may land anywhere: back to the upload page.
-    if (reason === "login" && !/tiktokstudio\/upload/.test(page.url())) { await page.goto(uploadUrl); await page.pause("betweenSteps"); }
+    if (reason === "login" && !onUploadPage()) { await page.goto(uploadUrl); await page.pause("betweenSteps"); }
   }
 
   async function click(name, opts) {
@@ -68,6 +83,45 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     if (!hit) throw new StepMissed(name);
     await page.clickRef(hit.ref);
     return hit;
+  }
+
+  // ---- the showcase ---------------------------------------------------------------------------
+  // Type one term into the product search, then wait for rows or TikTok's "no products".
+  async function search(term) {
+    tried.add(term.toLowerCase());
+    await click("productSearch");
+    await page.clearFocused();
+    await page.type(term);
+    await page.key("Enter");
+    const until = Date.now() + T.results;
+    for (;;) {
+      await page.sleep(500);
+      const rows = await page.rows(TARGETS.productRows);
+      if (rows.length || (await visible("productNoResults")) || Date.now() > until) return rows;
+    }
+  }
+  const noResults = () => visible("productNoResults");
+
+  // The link name TikTok shows after Next. Left exactly as it is, unless TikTok says it has
+  // characters it won't take: those come out (emoji and symbols first, then all but letters,
+  // numbers and spaces), and nothing else changes.
+  async function fixProductName() {
+    if (!(await visible("productNameError"))) return true;
+    const input = await waitFor("productNameInput", { ms: 3000 });
+    if (!input) return false;
+    for (const level of [1, 2]) {
+      const now = (await page.textOf(input.ref)) || "";
+      const clean = cleanProductName(now, level);
+      if (!clean || clean === now) continue;
+      log("tiktok product name", `level ${level}`, `${now.length} → ${clean.length} chars`);
+      say("product_name", "Taking out characters TikTok won't take in the product name");
+      await page.clickRef(input.ref);
+      await page.clearFocused();
+      await page.type(clean);
+      await page.pause("afterClick");
+      if (!(await visible("productNameError"))) return true;
+    }
+    return !(await visible("productNameError"));
   }
 
   // ---- the scripted steps ---------------------------------------------------------------------
@@ -78,7 +132,15 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
       await blockers();
     },
     async upload(job) {
-      const input = await waitFor("fileInput", { ms: T.find * 2 });
+      let input = await waitFor("fileInput", { ms: T.find });
+      if (!input) {
+        // Not on the upload area: TikTok Studio → Upload → Videos.
+        const nav = await waitFor("uploadNav", { ms: 3000 });
+        if (nav) { await page.clickRef(nav.ref); await page.pause("betweenSteps"); }
+        const tab = await waitFor("videosTab", { ms: 3000 });
+        if (tab) { await page.clickRef(tab.ref); await page.pause("afterClick"); }
+        input = await waitFor("fileInput", { ms: T.find });
+      }
       if (!input) throw new StepMissed("fileInput");
       await page.setFiles(input.ref, job.filePath);
     },
@@ -103,51 +165,73 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
       // TikTok opens a hashtag list while typing: close it so it can't eat the next click.
       if (job.hashtags.length) await page.key("Escape").catch(() => {});
       const now = (await page.textOf(box.ref)) || "";
-      if (!now.includes(job.caption.slice(0, 20))) throw new StepMissed("captionCheck");
+      if (!now.includes((job.caption || text).slice(0, 20))) throw new StepMissed("captionCheck");
     },
     async product_open() { await click("addLink"); },
     async product_tab() {
       await click("productsOption");
-      const next = await waitFor("linkNext", { ms: 3000 });
+      const next = await waitFor("linkNext", { ms: 3000, enabled: true });
       if (next) await page.clickRef(next.ref);
       if (!(await waitFor("productSearch", { ms: T.find }))) throw new StepMissed("productSearch");
     },
-    async product_search(job) {
-      await click("productSearch");
-      await page.clearFocused();
-      await page.type(job.product);
-      await page.key("Enter");
-      await page.sleep(1500);
-    },
-    async product_pick(job) { await click("productRows", { value: job.product }); },
-    async product_confirm() {
-      for (let i = 0; i < 4; i++) {
-        if (!(await visible("dialog"))) return;
-        const b = await waitFor("productConfirm", { ms: 4000, enabled: true });
-        if (!b) break;
-        await page.clickRef(b.ref);
-        await page.pause("betweenSteps");
+    async product_search(job) { await search(searchTerms(job.product)[0]); },
+    async product_pick(job) {
+      for (const term of searchTerms(job.product)) {
+        if (!tried.has(term.toLowerCase())) await search(term);
+        const rows = await page.rows(TARGETS.productRows);
+        const best = pickProduct(job.product, rows);
+        if (best) {
+          log("tiktok product", `picked row ${best.ref} of ${rows.length}`, `score ${best.score.toFixed(2)}`);
+          await page.clickRef(best.ref);
+          await page.pause("afterClick");
+          if (!(await CHECK.product_pick(job))) throw new StepMissed("productSelected");
+          return;
+        }
+        // nothing on screen at all and no "no products" either: the list moved, not the product
+        if (!rows.length && !(await noResults())) throw new StepMissed("productRows");
       }
-      if (await visible("dialog")) throw new StepMissed("productConfirm");
+      throw new Failed(NOT_IN_SHOWCASE, "product_not_found");
+    },
+    async product_next() {
+      await click("productNext", { enabled: true, ms: 5000 });
+      await page.pause("afterClick");
+    },
+    async product_name() {
+      // Some accounts skip the name step: nothing to do.
+      if (!(await waitFor("productNameInput", { ms: 4000 }))) return;
+      if (!(await fixProductName())) throw new Failed("TikTok wouldn't take the product's link name. Fix it in the TikTok window.", "product_name");
+    },
+    async product_add() {
+      for (let i = 0; i < 3; i++) {
+        const add = await waitFor("productAdd", { ms: 5000 });
+        if (!add) break;
+        if (add.disabled && !(await fixProductName())) throw new Failed("TikTok wouldn't take the product's link name. Fix it in the TikTok window.", "product_name");
+        await page.clickRef(add.ref);
+        await page.pause("betweenSteps");
+        if (!(await visible("dialog"))) return;
+        // TikTok may only complain about the name once Add is pressed
+        if (!(await fixProductName())) throw new Failed("TikTok wouldn't take the product's link name. Fix it in the TikTok window.", "product_name");
+      }
+      if (await visible("dialog")) throw new StepMissed("productAdd");
     },
     async post() { await click("postButton", { enabled: true, ms: T.find * 2 }); },
     async confirm_posted() {
       const until = Date.now() + T.posted;
       for (;;) {
         await blockers();
-        if (/tiktokstudio\/content/.test(page.url()) || (await visible("posted"))) return;
-        const now = await page.find(TARGETS.postNow);
+        if (await isPosted()) return;
+        const now = await page.find(TARGETS.postNowDialog);
         if (now) { await page.clickRef(now.ref); continue; }
         if (Date.now() > until) throw new StepMissed("posted");
         await page.sleep(1200);
       }
     },
     async handoff() {
-      say("handoff", "Everything is filled in. Check it and press Post in the TikTok window.", "ready");
+      say("handoff", "Everything is filled in. Check it and press Post now in the TikTok window.", "ready");
       const until = Date.now() + T.handoff;
       for (;;) {
         await page.sleep(2000);
-        if (/tiktokstudio\/content/.test(page.url()) || (await visible("posted"))) return "posted";
+        if (await isPosted()) return "posted";
         if (handedBack() || Date.now() > until) return "ready";
       }
     },
@@ -157,11 +241,16 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
   const CHECK = {
     upload: async () => !(await visible("fileInput")) || (await visible("captionBox")),
     wait_processed: async () => (await visible("uploaded")) && (await visible("captionBox")),
-    caption: async (job) => { const b = await page.find(TARGETS.captionBox); return !!b && ((await page.textOf(b.ref)) || "").includes(job.caption.slice(0, 20)); },
+    caption: async (job) => { const b = await page.find(TARGETS.captionBox); return !!b && ((await page.textOf(b.ref)) || "").includes((job.caption || captionText(job.caption, job.hashtags)).slice(0, 20)); },
+    product_open: async () => visible("dialog"),
     product_tab: async () => visible("productSearch"),
-    product_confirm: async () => !(await visible("dialog")),
-    post: async () => /tiktokstudio\/content/.test(page.url()) || (await visible("postNow")) || visible("posted"),
-    confirm_posted: async () => /tiktokstudio\/content/.test(page.url()) || visible("posted"),
+    product_search: async () => (await page.rows(TARGETS.productRows)).length > 0 || noResults(),
+    // the selected row must be the creator's product, whoever clicked it
+    product_pick: async (job) => (await page.rows(TARGETS.productSelected)).some((r) => productScore(job.product, r.text) >= PICK_AT),
+    product_next: async () => (await visible("productNameInput")) || (await visible("productAdd")) || !(await visible("dialog")),
+    product_add: async () => !(await visible("dialog")),
+    post: async () => (await isPosted()) || (await visible("postNowDialog")),
+    confirm_posted: async () => isPosted(),
   };
 
   // ---- the AI fallback ------------------------------------------------------------------------
@@ -227,6 +316,8 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
           await askGroot(step, job);
           // The AI only gets the page ready for the file; attaching it is always ours.
           if (step === "upload") await SCRIPTED.upload(job);
+          // The search box found by the AI: the showcase is searched and checked by the script.
+          if (step === "product_search") tried.clear();
         }
         await page.pause("betweenSteps");
       }
@@ -235,9 +326,10 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     } catch (e) {
       if (e && e.stopped) { say(current, "Stopped", "stopped"); return { status: "stopped", aiSteps: aiUsed }; }
       const error = e instanceof Failed || (e && e.needUser) ? e.message : `Something went wrong while ${String(STEP_WORDS[current] || "posting").toLowerCase()}.`;
+      const code = e instanceof Failed ? e.code : null;
       log("tiktok post failed", current, e && (e.stack || e.message));
-      say(current, error, "failed");
-      return { status: "failed", error, step: current, aiSteps: aiUsed };
+      say(current, error, "failed", code ? { code } : {});
+      return { status: "failed", error, code, step: current, aiSteps: aiUsed };
     }
   }
 

@@ -1,6 +1,8 @@
-// One post from start to finish, the way the app asks for it: download the finished export to a
-// temp file, open (or reuse) the TikTok window, drive TikTok with the engine, clean up. One post
-// at a time; the app queues the rest. Used by the IPC bridge (index.js) and by the harness
+// One post from start to finish, the way the app asks for it: get the video (download a finished
+// export, or the creator's own file from a folder they picked or dropped, or download it from their
+// Google Drive), open (or reuse) the TikTok window, drive TikTok with the engine, clean up (only our
+// own temp folder: the creator's files are never moved or deleted). One post at a time; the app
+// queues the rest. Used by the IPC bridge (index.js) and by the harness
 // (scripts/tiktok-harness.cjs), which points it at a local mock of TikTok Studio.
 "use strict";
 
@@ -43,7 +45,9 @@ async function downloadTo(fetchImpl, url, dir, name, signal) {
   return file;
 }
 
-function createPoster({ electron, log = () => {}, groot, fetchVideo, uploadUrl = TIKTOK_UPLOAD_URL, allowLocal = false, pace = 1, show = true, timeouts, icon, userAgent, tempRoot = path.join(os.tmpdir(), "goviral-groot") }) {
+function createPoster({ electron, log = () => {}, groot, fetchVideo, files = null, drive = null, uploadUrl = TIKTOK_UPLOAD_URL, allowLocal = false, pace = 1, show = true, timeouts, icon, userAgent, tempRoot = path.join(os.tmpdir(), "goviral-groot") }) {
+  // TikTok Studio's upload page (a function in the harness, which switches mock pages)
+  const target = () => (typeof uploadUrl === "function" ? uploadUrl() : uploadUrl);
   let tw = null;          // the TikTok window, kept between posts of a run
   let current = null;     // { abort, handedBack }
 
@@ -55,6 +59,21 @@ function createPoster({ electron, log = () => {}, groot, fetchVideo, uploadUrl =
     return tw;
   };
 
+  // The file TikTok gets: the creator's own (checked again by the registry), or a download.
+  async function videoFile(job, dir, signal) {
+    const src = job.source || { kind: "url", url: job.videoUrl };
+    if (src.kind === "file") {
+      const p = files && files.pathOf(src.fileId);
+      if (!p) throw new Error("That video isn't on this computer any more, or isn't one you picked.");
+      return p;
+    }
+    if (src.kind === "drive") {
+      if (!drive) throw new Error("Google Drive isn't connected.");
+      return drive.download(src.fileId, dir, signal);
+    }
+    return downloadTo(fetchVideo, src.url, dir, job.name, signal);
+  }
+
   async function post(job, onProgress = () => {}) {
     if (current) return { status: "failed", error: "Groot is already posting. One at a time.", code: "busy" };
     const abort = new AbortController();
@@ -64,18 +83,18 @@ function createPoster({ electron, log = () => {}, groot, fetchVideo, uploadUrl =
     const w = ensureWindow();
     const title = `Groot is posting "${job.name}"`;
     const report = (p) => {
-      const evt = { status: p.status || "posting", step: p.step || null, message: p.message || "", reason: p.reason || null, ai: !!p.ai };
+      const evt = { status: p.status || "posting", step: p.step || null, message: p.message || "", reason: p.reason || null, ai: !!p.ai, code: p.code || null };
       w.setStatus({ title, line: evt.message, status: evt.status });
       try { onProgress(evt); } catch { /* the app's problem */ }
     };
     if (show) w.focus();
     let page = null;
     try {
-      report({ step: "download", message: "Getting your video" });
-      const filePath = await downloadTo(fetchVideo, job.videoUrl, dir, job.name, abort.signal);
+      report({ step: "download", message: job.source && job.source.kind === "drive" ? "Getting your video from Google Drive" : "Getting your video" });
+      const filePath = await videoFile(job, dir, abort.signal);
       page = new CdpPage(w.contents, { pace, signal: abort.signal, log });
       page.attach();
-      const engine = createEngine({ page, groot, report, uploadUrl, timeouts, log, handedBack: () => me.handedBack });
+      const engine = createEngine({ page, groot, report, uploadUrl: target(), timeouts, log, handedBack: () => me.handedBack });
       const r = await engine.run({ ...job, filePath });
       return r;
     } catch (e) {
@@ -99,7 +118,7 @@ function createPoster({ electron, log = () => {}, groot, fetchVideo, uploadUrl =
     openWindow() {
       const w = ensureWindow();
       w.setStatus({ title: "TikTok", line: "Log in to TikTok here once. Groot uses this window to post.", status: "ready" });
-      if (!current) w.contents.loadURL(uploadUrl).catch(() => {});
+      if (!current) w.contents.loadURL(target()).catch(() => {});
       w.focus();
     },
     window: () => tw,

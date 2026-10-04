@@ -7,6 +7,7 @@ const path = require("path");
 const R = require(path.join(__dirname, "..", "src", "tiktok", "rules.js"));
 
 let failures = 0;
+const pending = [];
 const test = (name, fn) => { try { fn(); console.log(`  ok   ${name}`); } catch (e) { failures++; console.log(`  FAIL ${name}\n       ${e && e.message}`); } };
 const APP = "https://app.govirall.now";
 
@@ -63,8 +64,21 @@ test("file names are safe", () => {
 });
 
 console.log("the scripted-step planner");
-test("Auto with a product: upload, caption, product tag, post, confirm", () => {
-  assert.deepStrictEqual(R.planSteps({ mode: "auto", product: "Hydro" }), ["open", "upload", "wait_processed", "caption", "product_open", "product_tab", "product_search", "product_pick", "product_confirm", "post", "confirm_posted"]);
+test("Auto with a product: Drew's walk (upload, description, Add link, Products, Next, search, pick, Next, name, Add, Post now, success)", () => {
+  assert.deepStrictEqual(R.planSteps({ mode: "auto", product: "Hydro" }), ["open", "upload", "wait_processed", "caption", "product_open", "product_tab", "product_search", "product_pick", "product_next", "product_name", "product_add", "post", "confirm_posted"]);
+});
+test("TikTok Studio, not tiktok.com/upload", () => {
+  assert.strictEqual(R.TIKTOK_UPLOAD_URL, "https://www.tiktok.com/tiktokstudio/upload");
+});
+test("Manual vs Auto: the same filling-in, only Auto presses Post now", () => {
+  const a = R.planSteps({ mode: "auto", product: "x" }), m = R.planSteps({ mode: "manual", product: "x" });
+  assert.deepStrictEqual(a.slice(0, -2), m.slice(0, -1));
+  assert.deepStrictEqual(a.slice(-2), ["post", "confirm_posted"]);
+  assert.deepStrictEqual(m.slice(-1), ["handoff"]);
+});
+test("the link name is never the AI's; a row the AI clicks is still held to the creator's words", () => {
+  assert(!R.AI_STEPS.has("product_name"));
+  assert(R.AI_STEPS.has("product_pick"));
 });
 test("Manual stops at the handoff and never posts", () => {
   const s = R.planSteps({ mode: "manual", product: "Hydro" });
@@ -78,6 +92,104 @@ test("every step has words, every AI step has targets to try first", () => {
   for (const s of R.planSteps({ mode: "auto", product: "x" }).concat("handoff")) assert(R.STEP_WORDS[s], s);
   for (const t of Object.values(R.TARGETS)) assert(Array.isArray(t) && t.length > 0);
   assert(!R.AI_STEPS.has("open") && !R.AI_STEPS.has("handoff"));
+});
+
+console.log("the product in the showcase");
+test("the creator's words find TikTok's title (plurals, case, accents, filler)", () => {
+  assert.strictEqual(R.productScore("Comfort slippers", "Comfort Weekend Slipper"), 1);
+  assert.strictEqual(R.productScore("the comfort slippers", "COMFORT WEEKEND SLIPPER"), 1);
+  assert.strictEqual(R.productScore("Comfort slippers", "Cloud Comfort Slides"), 0.5);
+  assert.strictEqual(R.productScore("Hydro Flask 40 oz", "Hydro Flask 40 oz Tumbler"), 1);
+  assert.strictEqual(R.productScore("crème brûlée kit", "Creme Brulee Kit"), 1);
+  assert.strictEqual(R.productScore("", "anything"), 0);
+});
+test("pickProduct: the best row, the shorter title on a tie, nothing below 3 in 4 words", () => {
+  const rows = [{ ref: 0, text: "Cloud Comfort Slides" }, { ref: 1, text: "Comfort Weekend Slipper" }, { ref: 2, text: "Comfort Weekend Slipper Bundle 2 pack" }];
+  assert.strictEqual(R.pickProduct("Comfort slippers", rows).ref, 1);
+  assert.strictEqual(R.pickProduct("Fuzzy Bear Earmuffs", rows), null);
+  assert.strictEqual(R.pickProduct("Comfort", [{ ref: 0, text: "Cloud Comfort Slides" }]).ref, 0);
+  assert.strictEqual(R.pickProduct("Weekend comfort slippers navy", rows).ref, 1, "3 of 4 words is enough");
+  assert.strictEqual(R.pickProduct("Comfort slippers navy suede", rows), null, "2 of 4 is not");
+  assert.strictEqual(R.pickProduct("x", []), null);
+});
+test("searchTerms: as said, then the first word", () => {
+  assert.deepStrictEqual(R.searchTerms("Comfort slippers"), ["Comfort slippers", "Comfort"]);
+  assert.deepStrictEqual(R.searchTerms("The Comfort slippers"), ["The Comfort slippers", "Comfort"]);
+  assert.deepStrictEqual(R.searchTerms("Stanley"), ["Stanley"]);
+});
+test("cleanProductName: only what TikTok refuses comes out", () => {
+  assert.strictEqual(R.cleanProductName("Glow Serum ✨ Vitamin C ★ 30ml"), "Glow Serum Vitamin C 30ml");
+  assert.strictEqual(R.cleanProductName("Comfort Weekend Slipper"), "Comfort Weekend Slipper", "unchanged when clean");
+  assert.strictEqual(R.cleanProductName("Tom's Socks & Co. | Navy"), "Tom's Socks & Co. Navy");
+  assert.strictEqual(R.cleanProductName("Tom's Socks & Co. (Navy)", 2), "Tom s Socks Co Navy");
+  assert.strictEqual(R.cleanProductName("Hydro Flask™ 40oz®"), "Hydro Flask 40oz");
+});
+test("the not-in-showcase words", () => {
+  assert.strictEqual(R.NOT_IN_SHOWCASE, "That product isn't in your TikTok Shop showcase");
+});
+
+console.log("where a video comes from");
+test("a GoViral export, a file id, a Drive id; never a path", () => {
+  const base = { postId: "p1", mode: "auto" };
+  assert.deepStrictEqual(R.validatePostRequest({ ...base, source: { kind: "url", url: "https://a.public.blob.vercel-storage.com/x.mp4" } }).value.source, { kind: "url", url: "https://a.public.blob.vercel-storage.com/x.mp4" });
+  const f = R.validatePostRequest({ ...base, source: { kind: "file", fileId: "f_abcdefghijklmnopqrstuv" } });
+  assert(f.ok && f.value.source.kind === "file" && f.value.videoUrl === null);
+  assert(R.validatePostRequest({ ...base, source: { kind: "drive", fileId: "1AbCdEfGhIjK_-xyz" } }).ok);
+  assert(!R.validatePostRequest({ ...base, source: { kind: "file", fileId: "C:\\Users\\me\\x.mp4" } }).ok);
+  assert(!R.validatePostRequest({ ...base, source: { kind: "file", fileId: "../../etc/passwd" } }).ok);
+  assert(!R.validatePostRequest({ ...base, source: { kind: "drive", fileId: "a/b" } }).ok);
+  assert(!R.validatePostRequest({ ...base, source: { kind: "path", path: "/x.mp4" } }).ok);
+  assert(!R.validatePostRequest({ ...base }).ok);
+  assert.strictEqual(R.validatePostRequest({ ...base, videoUrl: "https://app.govirall.now/x.mp4" }).value.source.kind, "url", "the first shape still works");
+});
+
+console.log("the creator's folders (files.js)");
+const F = require(path.join(__dirname, "..", "src", "tiktok", "files.js"));
+test("inside the picked folder, never outside", () => {
+  assert(F.isInside("C:\\v\\TikTok Shop vids", "C:\\v\\TikTok Shop vids\\10-4", "win32"));
+  assert(F.isInside("C:\\v\\TikTok Shop vids", "c:\\V\\tiktok shop vids", "win32"));
+  assert(!F.isInside("C:\\v\\TikTok Shop vids", "C:\\v\\TikTok Shop vids2", "win32"));
+  assert(!F.isInside("C:\\v\\TikTok Shop vids", "C:\\v", "win32"));
+  assert.strictEqual(F.resolveRel(path.resolve("/tmp/shop"), "../x"), null);
+  assert.strictEqual(F.resolveRel(path.resolve("/tmp/shop"), "10-4/../../x"), null);
+  assert.strictEqual(F.resolveRel(path.resolve("/tmp/shop"), "10-4"), path.resolve("/tmp/shop", "10-4"));
+});
+test("videos only", () => {
+  for (const n of ["a.mp4", "B.MOV", "c.m4v", "d.webm"]) assert(F.isVideoName(n), n);
+  for (const n of ["a.txt", "a.mp4.lnk", ".hidden.mp4", "a.mkv", "a"]) assert(!F.isVideoName(n), n);
+});
+test("the length from the MP4 header, nothing decoded", () => {
+  const os = require("os"), fs = require("fs");
+  const box = (type, body) => { const h = Buffer.alloc(8); h.writeUInt32BE(8 + body.length, 0); h.write(type, 4, "latin1"); return Buffer.concat([h, body]); };
+  const v0 = Buffer.alloc(100); v0.writeUInt32BE(600, 12); v0.writeUInt32BE(600 * 31, 16);
+  const v1 = Buffer.alloc(112); v1[0] = 1; v1.writeUInt32BE(90000, 20); v1.writeBigUInt64BE(BigInt(90000 * 75), 24);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gvd-unit-"));
+  const a = path.join(dir, "a.mp4"), b = path.join(dir, "b.mov"), c = path.join(dir, "c.mp4");
+  fs.writeFileSync(a, Buffer.concat([box("ftyp", Buffer.from("isom0000")), box("mdat", Buffer.alloc(5000)), box("moov", Buffer.concat([box("trak", Buffer.alloc(40)), box("mvhd", v0)]))]));
+  fs.writeFileSync(b, Buffer.concat([box("ftyp", Buffer.from("qt  0000")), box("moov", box("mvhd", v1)), box("mdat", Buffer.alloc(5000))]));
+  fs.writeFileSync(c, Buffer.alloc(5000, 1));
+  pending.push((async () => {
+    assert.strictEqual(await F.mp4Seconds(a), 31);
+    assert.strictEqual(await F.mp4Seconds(b), 75);
+    assert.strictEqual(await F.mp4Seconds(c), null);
+    assert.strictEqual(await F.mp4Seconds(path.join(dir, "missing.mp4")), null);
+    fs.rmSync(dir, { recursive: true, force: true });
+  })());
+});
+
+console.log("Google Drive (drive.js)");
+const D = require(path.join(__dirname, "..", "src", "tiktok", "drive.js"));
+test("PKCE: S256 of the verifier, the verifier stays here", () => {
+  const { verifier, challenge } = D.pkcePair();
+  assert(verifier.length >= 43 && verifier.length <= 128);
+  assert.strictEqual(challenge, require("crypto").createHash("sha256").update(verifier).digest("base64url"));
+});
+test("only Google's consent page opens (or the harness's, in a dev build)", () => {
+  assert(D.isConsentUrl("https://accounts.google.com/o/oauth2/v2/auth?x=1"));
+  assert(!D.isConsentUrl("https://accounts.google.com.evil.example/"));
+  assert(!D.isConsentUrl("http://accounts.google.com/"));
+  assert(!D.isConsentUrl("http://127.0.0.1:5/x"));
+  assert(D.isConsentUrl("http://127.0.0.1:5/x", { allowLocal: true }));
 });
 
 console.log("the AI fallback's actions, checked on this side too");
@@ -121,5 +233,7 @@ test("typing goes out in chunks of 1 to 4 characters, nothing lost", () => {
   }
 });
 
-console.log(failures ? `\n${failures} failed` : "\nall passed");
-process.exit(failures ? 1 : 0);
+Promise.all(pending.map((p) => p.catch((e) => { failures++; console.log(`  FAIL (async) ${e && e.message}`); }))).then(() => {
+  console.log(failures ? `\n${failures} failed` : "\nall passed");
+  process.exit(failures ? 1 : 0);
+});
