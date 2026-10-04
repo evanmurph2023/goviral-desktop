@@ -22,7 +22,7 @@ already use in a browser. So:
 | Deep links | `goviral://<path>` opens `app.govirall.now/desktop/<path>` in the app; `goviral://open?url=<an app.govirall.now address>` opens that page. Anything pointing at another site is ignored. |
 | Offline | No internet: a GoViral "You're offline" page that reconnects on its own. |
 | Menu | Edit (undo, redo, cut, copy, paste, select all, so text fields work on a Mac), View (reload, zoom, full screen), Help (Contact support, check for updates, log file). Right-click menu with spelling suggestions. |
-| Security | contextIsolation on, nodeIntegration off, sandbox on. The page gets only `window.goviralDesktop = { version, platform }`. Permissions allowed only for app.govirall.now: camera, microphone, clipboard, HTML fullscreen, persistent storage (so the browser engine never clears the videos kept on the computer). Electron fuses: no run-as-Node, no NODE_OPTIONS / --inspect, app loads only from app.asar, cookies encrypted on disk. |
+| Security | contextIsolation on, nodeIntegration off, sandbox on. The page gets only `window.goviralDesktop = { version, platform }`, plus `tiktok` on the app's own /desktop pages (Groot posts to TikTok, below). Permissions allowed only for app.govirall.now: camera, microphone, clipboard, HTML fullscreen, persistent storage (so the browser engine never clears the videos kept on the computer). Electron fuses: no run-as-Node, no NODE_OPTIONS / --inspect, app loads only from app.asar, cookies encrypted on disk. |
 
 ## Files
 
@@ -31,6 +31,10 @@ src/main.js          the shell (window, menu, links, downloads, deep links, perm
 src/preload.js       window.goviralDesktop + the title strip
 src/links.js         which addresses are the app, where goviral:// lands (tested by scripts/check.cjs)
 src/offline.html     the offline page
+src/tiktok/          Groot posts to TikTok: rules.js (pure rules + selectors), engine.js (scripted steps + AI
+                     fallback), page.js (CDP driver), window.js (the TikTok window + bar), poster.js, index.js (IPC),
+                     files.js (the creator's picked folders + dropped files), drive.js (Google Drive connect + download)
+test/tiktok-mock/    a local mock of TikTok Studio's upload page, for the harness only (never packaged)
 assets/logo.png      offline page logo + window icon
 build/               icon.ico (Windows), icon-mac.png (Mac, becomes .icns), entitlements.mac.plist
 electron-builder.config.js   packaging + signing (signing switches on only when its secrets exist)
@@ -44,6 +48,8 @@ scripts/check.cjs        npm run check: parses, link rules, config, and the pack
 ```
 npm install
 npm run check            # no window opens
+npm run test:tiktok      # Groot's posting rules, plain Node
+npm run harness:tiktok   # the TikTok engine end to end against the local mock (opens windows briefly)
 npm start                # run it (if Electron says it is not installed: node node_modules/electron/install.js)
 npm run dist:win:x64     # unsigned Windows installer in dist/ (Windows machine)
 npm run dist:mac         # Mac dmg + zip (a Mac only)
@@ -191,3 +197,53 @@ flow). The page shows "Download for Windows" or "Download for Mac" first dependi
 computer, the other one under it, and keeps "Or install from your browser" as the third option.
 Inside the desktop app, `window.goviralDesktop` exists, so the app's own "Install GoViral" card
 should hide itself there.
+
+---
+
+# Groot posts to TikTok (2026-10-03)
+
+The app asks `window.goviralDesktop.tiktok.post({ postId, videoUrl, name, product, caption, hashtags, mode })`
+for one finished cut at a time (the app queues the rest). The main process checks the caller (only
+`<app>/desktop` pages) and every field, downloads the export to a temp file, and drives the real
+TikTok Studio upload page in a window of its own:
+
+- **The TikTok window**: a bar on top (what Groot is doing, **Stop**, and in Manual **Done, next video**)
+  over TikTok in its own persistent session `persist:tiktok`: the creator logs in once. No permissions,
+  no downloads, only TikTok and its log-in providers. Nothing is injected into TikTok's page.
+- **Scripted steps first** (src/tiktok/rules.js TARGETS): open, upload (DOM.setFileInputFiles), wait for
+  processing, caption (select all, delete, type), Add link, Products, search, pick, confirm, Post,
+  Post now, confirm it posted. Real mouse moves and clicks, typing in small chunks, pauses between.
+- **AI fallback**: when a step cannot find its target, the visible elements and a screenshot go to
+  `POST /api/groot-post/next-action` (Claude on the platform, the key never leaves the server); one
+  action comes back and is checked twice (platform and here). Capped per step and per post.
+- **Never**: solves a captcha or types a password. Either pauses everything until the creator does it.
+- **Manual** stops on the filled-in page and watches for the creator's own Post.
+
+The selectors are best guesses at TikTok Studio's page (built against the local mock, never against
+tiktok.com). The first real run will show which ones TikTok uses; the AI fallback covers the rest.
+
+## Finished videos (2026-10-04)
+
+Groot also posts videos that are already finished, from three places, all the creator's own:
+
+- **A folder on this computer**: `goviralDesktop.files.pickFolder({ remember })` opens the system folder
+  dialog. Groot may look in that folder and its subfolders (a few levels) and nowhere else; it is kept
+  across launches only when the creator says so (`remember`, stored in userData/groot-folders.json).
+  `folders(rootId)`, `videos(rootId, rel)` list names, lengths (read from the MP4/MOV header, nothing
+  decoded) and opaque ids; `thumbnail(fileId)` is the system's own thumbnail. The page never sends a path.
+- **Dropped files**: `goviralDesktop.files.addDropped(Array.from(event.dataTransfer.files))` (an array: a
+  FileList does not cross the context bridge). The preload turns each File into its path; a File the
+  page made up has none.
+- **Google Drive**: `goviralDesktop.drive.connect()` runs Google's installed-app flow (PKCE + a one-time
+  listener on 127.0.0.1, the system browser for consent); the platform holds the client secret and the
+  refresh token. A Drive video is downloaded to a temp folder with a short-lived read-only token.
+
+`tiktok.post({ source: { kind: "file" | "drive", fileId }, ... })` posts them; the creator's files are
+never moved or deleted (only our own temp folder is cleaned up).
+
+The scripted steps follow Drew's walk through TikTok Studio: tiktok.com/tiktokstudio → Upload → Videos →
+the video → the description (caption naming the product, then hashtags) → no playlist, no location →
+Add link → Products → Next → search the showcase → select → Next → Add → Post now → the success notice.
+A product that is not in the showcase stops that video ("That product isn't in your TikTok Shop
+showcase", code product_not_found) and the app goes on with the others. The product link name is
+never renamed; only characters TikTok refuses are taken out.

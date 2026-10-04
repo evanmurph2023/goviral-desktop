@@ -15,6 +15,9 @@ const { fileURLToPath } = require("url");
 // npm start); an installed copy never reads it, so nothing outside can re-point a user's app.
 const APP_ORIGIN = (!app.isPackaged && process.env.GOVIRAL_ORIGIN) || "https://app.govirall.now";
 const { PROTOCOL, isSafeExternal, makeLinks, originOf } = require("./links");
+// Groot posts to TikTok: its own window and session, driven from here (src/tiktok/*).
+const { setUpTikTok } = require("./tiktok");
+const { isTikTokSession } = require("./tiktok/window");
 const { appHome: APP_HOME, isAppUrl, deepLinkTarget, deepLinkIn } = makeLinks(APP_ORIGIN);
 const SUPPORT_URL = `${APP_ORIGIN}/support`;
 const APP_ID = "now.govirall.desktop";
@@ -234,6 +237,10 @@ function childWindowOptions() {
 // Rules for every page in the app (main window, child windows, anything created later)
 
 function hardenContents(contents) {
+  // The TikTok window (and its bar) has its own rules: TikTok and its log-in pages only, no
+  // permissions, no downloads (src/tiktok/window.js). The app rules below would send TikTok to
+  // the system browser.
+  if (isTikTokSession(contents.session, session)) return;
   contents.on("will-attach-webview", (e) => e.preventDefault());
 
   // Navigation stays on app.govirall.now (and the offline page); any other site opens in the browser.
@@ -499,6 +506,7 @@ function onReady() {
   app.setAboutPanelOptions({ applicationName: "GoViral", applicationVersion: app.getVersion(), copyright: "© GoViral", website: "https://govirall.now" });
   app.on("web-contents-created", (_e, contents) => hardenContents(contents));
   setUpSession();
+  setUpTikTok({ electron: require("electron"), appOrigin: APP_ORIGIN, log, icon: IS_MAC ? undefined : ICON });
   buildMenu();
   createMainWindow();
   setUpUpdates();
