@@ -4,6 +4,12 @@
 #              -> a draft release v1.0.1 is made, Windows (windows-latest) and Mac (macos-latest)
 #                 build and upload into it, and it goes public only when both have finished.
 #                 Installed apps see it within 4 hours (or Help > Check for updates).
+#   Beta:      a version with a dash (1.1.0-beta.1) and its tag (v1.1.0-beta.1): the same signed builds,
+#              but the release is a GitHub PRE-RELEASE and never "Latest". electron-updater on a stable
+#              install (1.0.x: allowPrerelease is false because its own version has no dash) asks
+#              GitHub for releases/latest, which skips pre-releases, so no 1.0.x install moves to a
+#              beta. A beta build writes beta.yml / beta-mac.yml (not latest*.yml); a beta install
+#              follows later betas and then the next stable release. Download it from the release page.
 #   Test run:  Actions > Release > Run workflow: builds both, uploads them as workflow artifacts,
 #              publishes nothing.
 #
@@ -46,9 +52,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # A dash in the tag (v1.1.0-beta.1) = a pre-release: marked so from the start, titled Beta.
+          pre=""; title="GoViral ${GITHUB_REF_NAME#v}"
+          case "$GITHUB_REF_NAME" in *-*) pre="--prerelease"; title="GoViral ${GITHUB_REF_NAME#v} (Beta)" ;; esac
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
-              --title "GoViral ${GITHUB_REF_NAME#v}" \
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft $pre \
+              --title "$title" \
               --notes "GoViral for Windows and Mac. Download GoViral-Setup-${GITHUB_REF_NAME#v}-x64.exe for Windows (GoViral-Setup-${GITHUB_REF_NAME#v}-arm64.exe on an ARM PC) or GoViral-${GITHUB_REF_NAME#v}.dmg for Mac."
           fi
 
@@ -244,7 +253,7 @@ jobs:
             dist/*.dmg
             dist/*.zip
             dist/*.blockmap
-            dist/latest*.yml
+            dist/*.yml
 
       - name: Remove the Mac signing keychain
         if: always() && runner.os == 'macOS'
@@ -260,7 +269,13 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      # A stable tag becomes Latest (what every installed app updates to). A beta tag (a dash in it)
+      # goes public as a pre-release and never Latest, so stable installs never see it.
       - name: Make the release public
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false ;;
+            *)   gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest ;;
+          esac
