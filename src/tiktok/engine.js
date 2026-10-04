@@ -19,6 +19,9 @@
 //
 // Blockers: a captcha or a login page pauses everything, says so in the window's bar and in the
 // app, and waits for the creator (Groot never solves a captcha and never types a password).
+// blockerMode "stop" (the cloud poster, goviral-platform poster/, where nobody is at the window):
+// a captcha, a login page or TikTok pushing back on the account ends the post at once with code
+// "captcha" / "login" / "spam" instead of waiting. The desktop keeps "wait".
 //
 // Pure of Electron: `page` is a CdpPage (or a fake in a test), `groot` is the client for the
 // platform, `report` gets progress. Returns { status: posted | ready | failed | stopped, error, code }.
@@ -33,7 +36,7 @@ const BLOCKER_WAIT_MS = 15 * 60 * 1000;
 const PROCESS_WAIT_MS = 15 * 60 * 1000;
 const HANDOFF_WATCH_MS = 30 * 60 * 1000;
 
-function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOAD_URL, timeouts = {}, log = () => {}, handedBack = () => false }) {
+function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOAD_URL, timeouts = {}, log = () => {}, handedBack = () => false, blockerMode = "wait" }) {
   const T = { find: 12000, results: 6000, processed: PROCESS_WAIT_MS, posted: 60000, blocker: BLOCKER_WAIT_MS, handoff: HANDOFF_WATCH_MS, ...timeouts };
   let aiUsed = 0;
   let current = null;
@@ -63,6 +66,12 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     const captcha = await page.find(TARGETS.captcha);
     const loginUrl = /\/login(\b|\/|\?|$)/i.test(page.url());
     const login = loginUrl || (await page.find(TARGETS.login));
+    if (blockerMode === "stop") {
+      if (captcha) throw new Failed("TikTok wants a security check.", "captcha");
+      if (login) throw new Failed("TikTok logged GoViral out.", "login");
+      if (await page.find(TARGETS.spam)) throw new Failed("TikTok is limiting this account right now.", "spam");
+      return;
+    }
     if (!captcha && !login) return;
     const reason = captcha ? "captcha" : "login";
     say(current, captcha ? "TikTok wants a quick check that you're human. Do it in the TikTok window, Groot waits." : "Log in to TikTok in the TikTok window. Groot never types your password.", "needs_you", { reason });
@@ -275,6 +284,7 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
           break;
         case "need_user":
           if (a.reason === "other") throw new Failed(a.message);
+          if (blockerMode === "stop") throw new Failed(a.message, a.reason === "captcha" ? "captcha" : "login");
           say(step, a.message, "needs_you", { reason: a.reason });
           await page.sleep(4000);
           await blockers();
@@ -326,7 +336,7 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     } catch (e) {
       if (e && e.stopped) { say(current, "Stopped", "stopped"); return { status: "stopped", aiSteps: aiUsed }; }
       const error = e instanceof Failed || (e && e.needUser) ? e.message : `Something went wrong while ${String(STEP_WORDS[current] || "posting").toLowerCase()}.`;
-      const code = e instanceof Failed ? e.code : null;
+      const code = e instanceof Failed ? e.code : e && e.needUser ? "login" : null;
       log("tiktok post failed", current, e && (e.stack || e.message));
       say(current, error, "failed", code ? { code } : {});
       return { status: "failed", error, code, step: current, aiSteps: aiUsed };
