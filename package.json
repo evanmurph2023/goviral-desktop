@@ -16,7 +16,7 @@
     "dist:win:x64": "electron-builder --config electron-builder.config.js --win nsis --x64",
     "dist:mac": "electron-builder --config electron-builder.config.js --mac",
     "release": "electron-builder --config electron-builder.config.js --publish always",
-    "test:tiktok": "node scripts/tiktok-unit.cjs",
+    "test:tiktok": "node scripts/tiktok-unit.cjs && node scripts/tiktok-engine-unit.cjs",
     "harness:tiktok": "electron scripts/tiktok-harness.cjs"
   },
   "dependencies": {

@@ -21,6 +21,9 @@
     ?captcha=1   a captcha covers the page after the upload, until the harness removes it
     ?login=1     a log-in screen until the harness "logs in"
     ?confirm=1   Post now opens a "Post now?" dialog first
+    ?slow=N      the upload takes N ticks of 300 ms instead of 4 (the form is usable meanwhile)
+    ?eat=1       the hashtag list EATS a typed space while it is open (only Escape closes it safely)
+    ?prefill=1   when the upload finishes, TikTok puts the file name back in the description
   Everything that happens is recorded in window.__mock for the harness to read.
 -->
 <style>
@@ -137,7 +140,7 @@
   const q = new URLSearchParams(location.search);
   const changed = q.get("v") === "changed";
   const $ = (id) => document.getElementById(id);
-  const M = (window.__mock = { variant: changed ? "changed" : "normal", page: null, file: null, size: 0, caption: null, product: null, productName: null, nameErrors: 0, searches: [], playlist: null, location: null, privacy: null, posted: false, events: [] });
+  const M = (window.__mock = { variant: changed ? "changed" : "normal", page: null, file: null, size: 0, caption: null, product: null, productName: null, nameErrors: 0, searches: [], playlist: null, location: null, privacy: null, posted: false, events: [], uploadPct: 0, captionTypedPct: null, eaten: 0, rewritten: 0 });
   const ev = (e) => M.events.push(e);
   // The creator's showcase. One title has an emoji and a symbol TikTok won't take as a link name.
   const PRODUCTS = ["Comfort Weekend Slipper", "Cloud Comfort Slides", "Hydro Flask 40 oz Tumbler", "Stanley Quencher H2.0 40 oz", "Glow Serum ✨ Vitamin C ★ 30ml"];
@@ -167,10 +170,13 @@
     $("pick").hidden = true; $("form").hidden = false;
     $("caption").textContent = f.name.replace(/\.(mp4|mov|webm)$/i, "");
     let pct = 0;
+    const ticks = Math.max(1, Number(q.get("slow")) || 4);
     const t = setInterval(() => {
-      pct += 25;
+      pct = Math.min(100, Math.round(pct + 100 / ticks));
+      M.uploadPct = pct;
       $("status").textContent = pct < 100 ? `Uploading ${pct}%` : "Uploaded";
       if (pct >= 100) {
+        if (q.get("prefill") === "1") { $("caption").textContent = f.name.replace(/\.(mp4|mov|webm)$/i, ""); M.rewritten++; ev("description rewritten"); }
         clearInterval(t);
         $("status").setAttribute("data-status", "success");
         enablePost();
@@ -188,8 +194,17 @@
 
   if (M.page === "home") $("pick").remove();
 
+  // ?eat=1: a space typed while the hashtag list is open is eaten (the list takes it and closes)
+  $("caption").addEventListener("beforeinput", (e) => {
+    if (q.get("eat") !== "1" || $("tags").hidden || e.inputType !== "insertText" || !e.data || !e.data.startsWith(" ")) return;
+    e.preventDefault();
+    $("tags").hidden = true; M.eaten++; ev("hashtag list ate a space");
+    const rest = e.data.slice(1);
+    if (rest) document.execCommand("insertText", false, rest);
+  });
   // the hashtag list while typing #word (a space or Escape closes it)
   $("caption").addEventListener("input", () => {
+    if (M.captionTypedPct === null && M.file) M.captionTypedPct = M.uploadPct;
     const text = $("caption").innerText;
     const m = /#([\p{L}\p{N}_]+)$/u.exec(text);
     if (m) { $("tags").hidden = false; $("tags").innerHTML = ["", "s", "tok"].map((x) => `<div role="option">#${m[1]}${x}</div>`).join(""); }

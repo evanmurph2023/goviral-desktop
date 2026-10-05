@@ -65,7 +65,14 @@ test("file names are safe", () => {
 
 console.log("the scripted-step planner");
 test("Auto with a product: Drew's walk (upload, description, Add link, Products, Next, search, pick, Next, name, Add, Post now, success)", () => {
-  assert.deepStrictEqual(R.planSteps({ mode: "auto", product: "Hydro" }), ["open", "upload", "wait_processed", "caption", "product_open", "product_tab", "product_search", "product_pick", "product_next", "product_name", "product_add", "post", "confirm_posted"]);
+  assert.deepStrictEqual(R.planSteps({ mode: "auto", product: "Hydro" }), ["open", "upload", "caption", "product_open", "product_tab", "product_search", "product_pick", "product_next", "product_name", "product_add", "wait_processed", "post", "confirm_posted"]);
+});
+test("speed: the description and product go in while TikTok uploads; the upload is waited for right before Post", () => {
+  for (const mode of ["auto", "manual"]) for (const product of ["x", null]) {
+    const s = R.planSteps({ mode, product });
+    assert(s.indexOf("caption") < s.indexOf("wait_processed"), "description first");
+    assert.strictEqual(s[s.indexOf("wait_processed") + 1], mode === "auto" ? "post" : "handoff");
+  }
 });
 test("TikTok Studio, not tiktok.com/upload", () => {
   assert.strictEqual(R.TIKTOK_UPLOAD_URL, "https://www.tiktok.com/tiktokstudio/upload");
@@ -92,6 +99,44 @@ test("every step has words, every AI step has targets to try first", () => {
   for (const s of R.planSteps({ mode: "auto", product: "x" }).concat("handoff")) assert(R.STEP_WORDS[s], s);
   for (const t of Object.values(R.TARGETS)) assert(Array.isArray(t) && t.length > 0);
   assert(!R.AI_STEPS.has("open") && !R.AI_STEPS.has("handoff"));
+});
+
+console.log("no silent hangs: every wait has a limit, every AI step has words for the creator");
+test("timeouts: a missing button goes to Groot in seconds; the upload waits long only while it moves", () => {
+  const T = R.TIMEOUTS;
+  assert(T.find <= 10000 && T.results <= 10000 && T.goto <= 30000);
+  assert(T.stall <= 30000, "nothing on screen about the upload: Groot looks within 30 s");
+  assert(T.stuck <= 5 * 60000 && T.creator <= 3 * 60000 && T.ai <= 45000 && T.cdp <= 20000);
+  for (const [k, v] of Object.entries(T)) assert(Number.isFinite(v) && v > 0, k);
+});
+test("every step Groot can try has plain words for the creator when Groot can't", () => {
+  for (const s of R.AI_STEPS) assert(R.STEP_HELP[s] && /TikTok window/.test(R.STEP_HELP[s]), s);
+  for (const t of Object.values(R.STEP_HELP)) assert(!/[—–]/.test(t), "no dashes in the creator's words");
+});
+test("TikTok's upload words: uploaded vs still going", () => {
+  const re = (name) => R.TARGETS[name].filter((w) => w.text).map((w) => new RegExp(w.text, "i"));
+  const up = (t) => re("uploaded").some((r) => r.test(t));
+  const going = (t) => re("uploadProgress").some((r) => r.test(t));
+  for (const t of ["Uploaded", "Uploaded (25.08MB)", "Uploaded（25.08MB）", "Upload complete", "Upload completed.", "100%", "100 %"]) assert(up(t), t);
+  for (const t of ["Upload", "Uploaded videos", "Upload videos", "Uploading 45%", "45%"]) assert(!up(t), t);
+  for (const t of ["Uploading 45%", "Uploading...", "Processing", "45%", "7.5 %"]) assert(going(t), t);
+  for (const t of ["100%", "Uploaded", "Upload"]) assert(!going(t), t);
+});
+
+console.log("the description");
+test("normCaption: spaces collapsed, invisible characters gone", () => {
+  assert.strictEqual(R.normCaption("  a\u200b  b\n#c\u00a0d "), "a b #c d");
+  assert.strictEqual(R.normCaption(null), "");
+});
+test("captionParts: the caption, then each hashtag on its own (Escape goes after each)", () => {
+  assert.deepStrictEqual(R.captionParts("the comfort weekend slipper", ["slippers", "comfort"]), ["the comfort weekend slipper", " #slippers", " #comfort"]);
+  assert.deepStrictEqual(R.captionParts("", ["a", "b"]), ["#a", " #b"]);
+  assert.strictEqual(R.captionParts("x y", ["a", "b"]).join(""), R.captionText("x y", ["a", "b"]), "the pieces are exactly the caption text");
+});
+test("showcaseList: a few titles for a needs-you message", () => {
+  assert.strictEqual(R.showcaseList([{ text: "A" }, { text: "B" }, { text: "A" }]), '"A", "B"');
+  assert.strictEqual(R.showcaseList([1, 2, 3, 4, 5, 6, 7].map((n) => ({ text: `P${n}` })), 3), '"P1", "P2", "P3" and 4 more');
+  assert.strictEqual(R.showcaseList([]), "");
 });
 
 console.log("the product in the showcase");
@@ -219,10 +264,15 @@ test("caps", () => { assert(R.MAX_AI_PER_STEP <= 10 && R.MAX_AI_PER_POST <= 30);
 
 console.log("human pacing");
 test("delays sit in their ranges and scale with pace", () => {
-  assert.strictEqual(R.delay("beforeClick", 1, () => 0), 350);
-  assert.strictEqual(R.delay("beforeClick", 1, () => 1), 900);
-  assert.strictEqual(R.delay("beforeClick", 0.5, () => 0), 175);
-  for (let i = 0; i < 50; i++) { const d = R.delay("keyChunk"); assert(d >= 35 && d <= 120); }
+  assert.strictEqual(R.delay("beforeClick", 1, () => 0), 300);
+  assert.strictEqual(R.delay("beforeClick", 1, () => 1), 700);
+  assert.strictEqual(R.delay("beforeClick", 0.5, () => 0), 150);
+  for (let i = 0; i < 50; i++) { const d = R.delay("keyChunk"); assert(d >= 25 && d <= 80); }
+});
+test("small human pauses (0.3-1.5 s between actions, never 2-8 s); polling is quick", () => {
+  for (const k of ["beforeClick", "afterClick", "betweenSteps"]) { const [lo, hi] = R.DELAYS[k]; assert(lo >= 200 && hi <= 1500, k); }
+  assert(R.DELAYS.beforeClick[0] + R.DELAYS.afterClick[0] >= 300, "a click is never instant");
+  assert(R.DELAYS.poll[1] <= 500, "a step moves on within half a second of TikTok being ready");
 });
 test("typing goes out in chunks of 1 to 4 characters, nothing lost", () => {
   const text = "Ice for two days, no joke #hydroflask #tiktokshop";

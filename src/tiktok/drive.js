@@ -23,9 +23,8 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
-const { Readable } = require("stream");
-const { pipeline } = require("stream/promises");
 const { safeFileName } = require("./rules");
+const { saveBody } = require("./transfer");
 
 const CONNECT_WAIT_MS = 5 * 60 * 1000;
 const MAX_BYTES = 4 * 1024 ** 3;
@@ -109,8 +108,12 @@ function createDriveClient({ origin, platformFetch, fetchFile, openExternal, log
 
   // One Drive video into `dir`. The platform checks the file is a video in this creator's Drive
   // and hands back a short-lived read-only token for it.
-  async function download(fileId, dir, signal) {
+  // hooks: onStart({ total }) once Google answered, onBytes(n) as the bytes arrive (poster.js logs
+  // them and runs TikTok Studio meanwhile); no bytes for stallMs ends it with plain words.
+  async function download(fileId, dir, signal, { onStart = () => {}, onBytes = () => {}, stallMs = 60000 } = {}) {
+    const t0 = Date.now();
     const a = await call("/api/drive/access", { fileId });
+    log("drive access", a.status, `${Date.now() - t0} ms`);
     if (a.status !== 200 || !a.j.ok || typeof a.j.accessToken !== "string") throw new Error((typeof a.j.error === "string" && a.j.error) || "Couldn't get that video from Google Drive.");
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, safeFileName(typeof a.j.name === "string" ? a.j.name : "Drive video"));
@@ -118,7 +121,8 @@ function createDriveClient({ origin, platformFetch, fetchFile, openExternal, log
     if (!res.ok || !res.body) throw new Error(`The video didn't download from Google Drive (${res.status}).`);
     const len = Number(res.headers.get("content-length") || 0);
     if (len > MAX_BYTES) throw new Error("That video is too big to post.");
-    await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(file), { signal });
+    onStart({ total: len });
+    await saveBody(res.body, file, { signal, stallMs, onBytes });
     if (fs.statSync(file).size < 1000) throw new Error("The video didn't download from Google Drive.");
     return file;
   }

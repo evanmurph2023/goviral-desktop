@@ -5,7 +5,8 @@
 //   gvd:tiktok:post   { postId, source | videoUrl, name, product, caption, hashtags, mode, platform?, brand? }
 //                     source = { kind: "url", url } | { kind: "file", fileId } | { kind: "drive", fileId }
 //                     platform = "tiktok" (default) | "trybe"; a Trybe post names the brand (no product)
-//                     → { ok, status: posted | ready | failed | stopped, error?, code?, submissionId? }
+//                     → { ok, status: posted | ready | failed | stopped, error?, code?, submissionId?,
+//                         step?, ms?, steps: [{ step, ms, ok, how, ai, why? }] }  (the engine's step trail)
 //                     progress: "gvd:tiktok:progress" { postId, status, step, message, reason, ai, code }
 //   gvd:tiktok:stop   → stops the post running now
 //   gvd:tiktok:open   → shows the TikTok window (to log in once, ahead of the first post)
@@ -88,8 +89,9 @@ function setUpTikTok({ electron, appOrigin, log, icon, overrides = {} }) {
     const job = v.value;
     log("tiktok post start", job.postId, job.platform, job.mode, job.source.kind, job.platform === "trybe" ? "brand" : job.product ? "product" : "no product");
     const r = await poster.post(job, (p) => { if (!e.sender.isDestroyed()) e.sender.send("gvd:tiktok:progress", { postId: job.postId, ...p }); });
-    log("tiktok post end", job.postId, r.status, r.code || "", r.error || "");
-    return { ok: r.status === "posted" || r.status === "ready", postId: job.postId, platform: job.platform, status: r.status, error: r.error || null, code: r.code || null, aiSteps: r.aiSteps || 0, submissionId: r.submissionId || null };
+    log("tiktok post end", job.postId, r.status, r.step ? `at ${r.step}` : "", r.ms ? `${(r.ms / 1000).toFixed(1)} s` : "", `${r.aiSteps || 0} AI`, r.code || "", r.error || "");
+    // steps: the engine's trail (each step's time, what it used, why it missed), for the app's post log
+    return { ok: r.status === "posted" || r.status === "ready", postId: job.postId, platform: job.platform, status: r.status, error: r.error || null, code: r.code || null, aiSteps: r.aiSteps || 0, submissionId: r.submissionId || null, step: r.step || null, ms: r.ms || null, steps: Array.isArray(r.steps) ? r.steps.slice(0, 40) : [] };
   }, { ok: false, status: "failed", error: "Not allowed." });
   handle("gvd:tiktok:stop", () => { poster.stop(); return true; }, false);
   handle("gvd:tiktok:open", () => { poster.openWindow("tiktok"); return true; }, false);

@@ -26,6 +26,11 @@
 //     the folder is remembered only when asked
 //  15 dropped files: a File from the page → its path in the preload → an id → posted
 //  16 Google Drive: connect (PKCE + the loopback listener) → a Drive video downloaded and posted
+//  17 slow upload: the description and product go in WHILE TikTok uploads; Post only after it
+//  18 the hashtag list eats a space typed while it is open: Escape after each tag, exact description
+//  19 TikTok puts the file name back when the upload finishes: the description is written again
+//  20 the showcase shows products, none clearly the creator's: needs you with the list; the creator
+//     picks one in the window; Groot carries on and posts it
 "use strict";
 
 const http = require("http");
@@ -44,7 +49,7 @@ const SHOTS = process.argv.find((a, i) => i > 1 && !a.startsWith("-") && !a.ends
 const SHOW = process.env.GVD_HARNESS_HIDE !== "1";
 const PACE = 0.15;
 const LOG = process.env.GVD_HARNESS_LOG === "1" ? (...a) => console.log("       ·", ((Date.now() % 100000) / 1000).toFixed(1), ...a.map((x) => (x instanceof Error ? x.message : typeof x === "string" ? x : JSON.stringify(x)))) : () => {};
-const TIMEOUTS = { find: 3500, results: 3000, posted: 15000, blocker: 30000, handoff: 30000, processed: 20000 };
+const TIMEOUTS = { find: 3500, results: 3000, posted: 15000, blocker: 30000, handoff: 30000, processed: 20000, stall: 8000, creator: 20000 };
 
 app.commandLine.appendSwitch("disable-gpu-sandbox");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -374,7 +379,8 @@ app.whenReady().then(async () => {
     const events = [];
     const r = await p.post(job({ postId: "nf1", product: "Fuzzy Bear Earmuffs" }), (e) => events.push(e));
     assert.strictEqual(r.status, "failed");
-    assert.strictEqual(r.error, "That product isn't in your TikTok Shop showcase");
+    assert(r.error.startsWith("That product isn't in your TikTok Shop showcase"), r.error);
+    assert.match(r.error, /"Fuzzy Bear Earmuffs" or "Fuzzy"/, "says what was searched");
     assert.strictEqual(r.code, "product_not_found");
     const m = await mockState(p);
     assert.strictEqual(m.posted, false);
@@ -476,6 +482,54 @@ app.whenReady().then(async () => {
     const missing = await postViaApp({ postId: "drv2", source: { kind: "drive", fileId: "NotMine_0123456789" }, name: "x", mode: "auto", product: null, caption: "x", hashtags: [] });
     assert.strictEqual(missing.r.status, "failed");
     bridged.close();
+  });
+
+  await scenario("17 slow upload: description + product typed WHILE TikTok uploads; Post only after it", async () => {
+    const p = makePoster("?slow=30");
+    const r = await p.post(job({ postId: "slow1", product: "Comfort slippers", caption: "the comfort weekend slipper for lazy days at home", hashtags: ["slippers", "comfort", "weekendvibes", "cozyathome"] }));
+    assert.strictEqual(r.status, "posted", JSON.stringify(r));
+    const m = await mockState(p);
+    assert(m.captionTypedPct !== null && m.captionTypedPct < 100, `typed at ${m.captionTypedPct}%`);
+    assert.strictEqual(m.caption, "the comfort weekend slipper for lazy days at home #slippers #comfort #weekendvibes #cozyathome");
+    assert.strictEqual(m.product, "Comfort Weekend Slipper");
+    assert(Array.isArray(r.steps) && r.steps.length === 13 && r.steps.every((s) => s.ok), JSON.stringify(r.steps));
+    console.log(`       steps: ${r.steps.map((s) => `${s.step} ${(s.ms / 1000).toFixed(1)}`).join(", ")}`);
+    p.close();
+  });
+
+  await scenario("18 the hashtag list eats a space typed while it's open: the description still exact", async () => {
+    const p = makePoster("?eat=1");
+    const r = await p.post(job({ postId: "eat1", caption: "the comfort weekend slipper for lazy days at home", hashtags: ["slippers", "comfort", "weekendvibes", "cozyathome"] }));
+    assert.strictEqual(r.status, "posted", JSON.stringify(r));
+    const m = await mockState(p);
+    assert.strictEqual(m.caption, "the comfort weekend slipper for lazy days at home #slippers #comfort #weekendvibes #cozyathome");
+    assert.strictEqual(m.eaten, 0, "never typed a space into an open hashtag list");
+    p.close();
+  });
+
+  await scenario("19 TikTok puts the file name back when the upload finishes: written again before Post", async () => {
+    const p = makePoster("?prefill=1&slow=12");
+    const r = await p.post(job({ postId: "prefill1", name: "comfort slippers" }));
+    assert.strictEqual(r.status, "posted", JSON.stringify(r));
+    const m = await mockState(p);
+    assert.strictEqual(m.rewritten, 1);
+    assert.strictEqual(m.caption, CAPTION, "not the file name");
+    p.close();
+  });
+
+  await scenario("20 none clearly the creator's product: needs you with the list; the creator picks; posted", async () => {
+    const p = makePoster();
+    const events = [];
+    const run = p.post(job({ postId: "pick1", product: "Comfort shoes" }), (e) => events.push(e));
+    assert(await waitUntil(() => events.some((e) => e.status === "needs_you" && e.reason === "step")), "no needs-you");
+    const ask = events.find((e) => e.status === "needs_you");
+    assert.match(ask.message, /"Comfort Weekend Slipper", "Cloud Comfort Slides"/);
+    await shot(p, "engine-20-needs-you-pick");
+    await inMock(p, `[...document.querySelectorAll("#rows [role=radio]")].find((r) => r.textContent === "Cloud Comfort Slides").click()`); // the creator's choice
+    const r = await run;
+    assert.strictEqual(r.status, "posted", JSON.stringify(r));
+    assert.strictEqual((await mockState(p)).product, "Cloud Comfort Slides");
+    p.close();
   });
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

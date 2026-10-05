@@ -11,9 +11,8 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { Readable } = require("stream");
-const { pipeline } = require("stream/promises");
 const { createTikTokWindow } = require("./window");
+const { saveBody } = require("./transfer");
 const { CdpPage } = require("./page");
 const { createEngine } = require("./engine");
 const { createTrybeEngine } = require("./trybe-engine");
@@ -21,13 +20,16 @@ const { TRYBE_ORIGIN } = require("./trybe");
 const { STEP_WORDS, safeFileName, TIKTOK_UPLOAD_URL } = require("./rules");
 
 const MAX_BYTES = 4 * 1024 ** 3;
+const AI_FETCH_MS = 35000; // the platform's route allows 30 s; the engine gives up at 40 s either way
+const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
 
 // The platform's AI fallback, called with the app's own sign-in (the default session's cookie).
 function makeGrootClient({ fetchImpl, origin }) {
   return {
     async nextAction(body) {
       try {
-        const res = await fetchImpl(`${origin}/api/groot-post/next-action`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body) });
+        const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(AI_FETCH_MS) : undefined;
+        const res = await fetchImpl(`${origin}/api/groot-post/next-action`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body), signal });
         const j = await res.json().catch(() => null);
         if (res.ok && j && j.ok && j.action) return { ok: true, action: j.action };
         return { ok: false, error: (j && typeof j.error === "string" && j.error) || `Groot couldn't see the page (${res.status}).` };
@@ -36,14 +38,16 @@ function makeGrootClient({ fetchImpl, origin }) {
   };
 }
 
-async function downloadTo(fetchImpl, url, dir, name, signal) {
+// onStart({ total }) once the server answered (the bytes still to come), onBytes(n) as they arrive.
+async function downloadTo(fetchImpl, url, dir, name, signal, { onStart = () => {}, onBytes = () => {}, stallMs = 60000 } = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, safeFileName(name));
   const res = await fetchImpl(url, { signal });
   if (!res.ok || !res.body) throw new Error(`The video didn't download (${res.status}).`);
   const len = Number(res.headers.get("content-length") || 0);
   if (len > MAX_BYTES) throw new Error("That video is too big to post.");
-  await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(file), { signal });
+  onStart({ total: len });
+  await saveBody(res.body, file, { signal, stallMs, onBytes });
   const size = fs.statSync(file).size;
   if (size < 1000) throw new Error("The video didn't download.");
   return file;
@@ -68,7 +72,7 @@ function createPoster({ electron, log = () => {}, groot, fetchVideo, files = nul
   };
 
   // The file TikTok gets: the creator's own (checked again by the registry), or a download.
-  async function videoFile(job, dir, signal) {
+  async function videoFile(job, dir, signal, hooks = {}) {
     const src = job.source || { kind: "url", url: job.videoUrl };
     if (src.kind === "file") {
       const p = files && files.pathOf(src.fileId);
@@ -77,9 +81,9 @@ function createPoster({ electron, log = () => {}, groot, fetchVideo, files = nul
     }
     if (src.kind === "drive") {
       if (!drive) throw new Error("Google Drive isn't connected.");
-      return drive.download(src.fileId, dir, signal);
+      return drive.download(src.fileId, dir, signal, hooks);
     }
-    return downloadTo(fetchVideo, src.url, dir, job.name, signal);
+    return downloadTo(fetchVideo, src.url, dir, job.name, signal, hooks);
   }
 
   async function post(job, onProgress = () => {}) {
@@ -98,24 +102,57 @@ function createPoster({ electron, log = () => {}, groot, fetchVideo, files = nul
     };
     if (show) w.focus();
     let page = null;
+    // The download runs WHILE TikTok Studio opens and the upload area is found (2026-10-05): the
+    // engine waits for the file only when it is ready to put it in. Its own abort, so a post that
+    // ends early never leaves a download running.
+    const dlAbort = new AbortController();
+    const onStop = () => dlAbort.abort();
+    abort.signal.addEventListener("abort", onStop, { once: true });
+    const dl = { bytes: 0, total: 0 };
+    let fileP = null;
     try {
-      report({ step: "download", message: job.source && job.source.kind === "drive" ? "Getting your video from Google Drive" : "Getting your video" });
-      const filePath = await videoFile(job, dir, abort.signal);
+      const src = (job.source && job.source.kind) || "url";
+      report({ step: "download", message: src === "drive" ? "Getting your video from Google Drive" : "Getting your video" });
+      const t0 = Date.now();
+      let lastLog = t0;
+      let started;
+      const startedP = new Promise((res) => { started = res; });
+      log("tiktok download start", job.postId, src);
+      fileP = Promise.resolve().then(() => videoFile(job, dir, dlAbort.signal, {
+        onStart: ({ total }) => { dl.total = total || 0; log("tiktok download answered", job.postId, `${Date.now() - t0} ms`, total ? mb(total) : "size unknown"); started(); },
+        onBytes: (n) => {
+          dl.bytes = n;
+          if (Date.now() - lastLog > 10000) { lastLog = Date.now(); log("tiktok download progress", job.postId, mb(n), dl.total ? `of ${mb(dl.total)}` : "", `${(n / 1048576 / ((Date.now() - t0) / 1000)).toFixed(1)} MB/s`); }
+        },
+      })).then((file) => {
+        const size = fs.statSync(file).size;
+        const s = (Date.now() - t0) / 1000;
+        log("tiktok download done", job.postId, src, mb(size), `${s.toFixed(1)} s`, src === "file" ? "(the creator's own file)" : `${(size / 1048576 / Math.max(s, 0.001)).toFixed(1)} MB/s`);
+        return file;
+      }, (e) => { log("tiktok download failed", job.postId, `${((Date.now() - t0) / 1000).toFixed(1)} s`, e && e.message); throw e; });
+      fileP.catch(() => {}); // read by the engine (or below)
+      // A download that fails at once (not connected, gone, too big) fails before TikTok is touched.
+      const gate = await Promise.race([startedP.then(() => null), fileP.then(() => null, (e) => e)]);
+      if (gate) throw Object.assign(gate, { isDownload: true });
       page = new CdpPage(w.contents, { pace, signal: abort.signal, log });
       page.attach();
       const engine = kind === "trybe"
         ? createTrybeEngine({ page, groot, report, baseUrl: trybeBase(), timeouts, log, handedBack: () => me.handedBack })
         : createEngine({ page, groot, report, uploadUrl: target(), timeouts, log, handedBack: () => me.handedBack });
-      const r = await engine.run({ ...job, filePath });
+      // Trybe's engine takes the finished file; TikTok's takes it as it comes.
+      const r = kind === "trybe" ? await engine.run({ ...job, filePath: await fileP }) : await engine.run({ ...job, filePath: fileP, fileProgress: () => dl });
       return r;
     } catch (e) {
-      if (abort.signal.aborted) { report({ status: "stopped", message: "Stopped" }); return { status: "stopped" }; }
+      if (abort.signal.aborted) { report({ status: "stopped", message: "Stopped" }); return { status: "stopped", step: "download", error: "Stopped while getting the video." }; }
       const error = (e && e.message) || "Something went wrong.";
       log("tiktok post error", e);
       report({ status: "failed", message: error });
-      return { status: "failed", error };
+      return { status: "failed", error, ...(e && e.isDownload ? { step: "download", code: "download" } : {}) };
     } finally {
+      abort.signal.removeEventListener("abort", onStop);
+      dlAbort.abort();
       if (page) page.detach();
+      if (fileP) await Promise.race([fileP.catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
       fs.rm(dir, { recursive: true, force: true }, () => {});
       current = null;
     }

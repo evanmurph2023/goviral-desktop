@@ -108,6 +108,27 @@ function captionText(caption, hashtags) {
   return [caption || "", (hashtags || []).map((h) => `#${h}`).join(" ")].filter(Boolean).join(" ").trim();
 }
 
+// The description compared the way a person reads it: spaces collapsed, the invisible characters
+// an editor adds (zero-width, BOM) gone.
+function normCaption(t) {
+  return String(t || "").normalize("NFC").replace(/[​-‍⁠﻿]/g, "").replace(/\s+/g, " ").trim();
+}
+// What Groot types, in pieces: the caption, then each hashtag on its own (" #tag"), so TikTok's
+// hashtag list is closed (Escape) after every tag, before the next space goes in.
+function captionParts(caption, hashtags) {
+  const out = [];
+  if (caption) out.push(caption);
+  for (const h of hashtags || []) out.push(`${out.length ? " " : ""}#${h}`);
+  return out;
+}
+
+// The rows TikTok showed in the showcase, for a "needs you" message: a few titles, short.
+function showcaseList(rows, max = 5) {
+  const t = [...new Set((rows || []).map((r) => String(r.text || "").replace(/\s+/g, " ").trim().slice(0, 60)).filter(Boolean))];
+  if (!t.length) return "";
+  return t.slice(0, max).map((x) => `"${x}"`).join(", ") + (t.length > max ? ` and ${t.length - max} more` : "");
+}
+
 // A file name for a downloaded video (TikTok shows it while uploading).
 function safeFileName(name) {
   const base = String(name || "GoViral video").replace(/\.(mp4|mov|m4v|webm)$/i, "").replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "GoViral video";
@@ -182,8 +203,11 @@ const TARGETS = {
   uploadNav: [{ css: '[data-e2e="upload_nav"]' }, { text: "^upload$", within: "nav a, nav button, nav [role=button], aside a, aside button, a, button" }],
   videosTab: [{ css: '[data-e2e="upload_videos_tab"]' }, { text: "^videos?$", within: "[role=tab], button, a" }],
   fileInput: [{ css: 'input[type="file"][accept*="video"]', hidden: true }, { css: 'input[type="file"]', hidden: true }],
-  uploaded: [{ css: '[data-e2e="upload_status_text"][data-status="success"]' }, { text: "^(uploaded|upload complete|100%)$", within: "div, span, p" }],
+  // TikTok's own words when the file is up ("Uploaded", "Uploaded (25.1MB)", "Upload complete", "100%")
+  uploaded: [{ css: '[data-e2e="upload_status_text"][data-status="success"]' }, { text: "^((uploaded|upload(ed)? (complete|completed|successful(ly)?))[.!]?(\\s*[(（][^)）]{0,40}[)）])?|100\\s*%)$", within: "div, span, p" }],
   uploadFailed: [{ text: "^(upload failed|couldn.t upload|upload error)", within: "div, span, p" }],
+  // still going: "Uploading 45%", "Processing", a bare "45%", a progress bar (read for the log and the bar)
+  uploadProgress: [{ text: "^(uploading|processing)\\b", within: "div, span, p" }, { text: "^\\d{1,2}(\\.\\d+)?\\s*%$", within: "div, span, p" }, { css: '[role=progressbar]:not([aria-valuenow="100"])' }],
   captionBox: [{ css: '[data-e2e="caption_container"] [contenteditable="true"]' }, { css: '.public-DraftEditor-content[contenteditable="true"]' }, { css: 'div[contenteditable="true"][role="combobox"]' }, { css: 'div[contenteditable="true"]' }],
   // Add link → Products → Next → search → pick → Next → (the name) → Add
   addLink: [{ css: '[data-e2e="add_link_button"]' }, { text: "^\\+?\\s*add link$", within: BTN }],
@@ -211,14 +235,50 @@ const TARGETS = {
 // The steps of one post. Manual stops on the filled-in page (handoff) and watches for the creator's
 // own Post; Auto presses Post now and waits for TikTok's success notice. No product = no product
 // steps. Playlist and location are never touched: they stay empty.
+// Speed (2026-10-05): the description and the product go in WHILE TikTok uploads the video (TikTok
+// Studio shows the form as soon as the file is chosen). wait_processed comes last, right before
+// Post, and checks the description again in case TikTok rewrote it when the upload finished.
 const PRODUCT_STEPS = ["product_open", "product_tab", "product_search", "product_pick", "product_next", "product_name", "product_add"];
 function planSteps({ mode, product }) {
-  const steps = ["open", "upload", "wait_processed", "caption"];
+  const steps = ["open", "upload", "caption"];
   if (product) steps.push(...PRODUCT_STEPS);
+  steps.push("wait_processed");
   if (mode === "manual") steps.push("handoff");
   else steps.push("post", "confirm_posted");
   return steps;
 }
+
+// How long each wait may take before the step asks Groot (the AI fallback) or the creator. Nothing
+// waits silently: the upload waits long only while TikTok shows it moving.
+const TIMEOUTS = {
+  find: 8000,               // a button or box on a loaded page
+  results: 6000,            // the showcase search results
+  goto: 30000,              // a page load (TikTok Studio keeps loading things: carry on after this)
+  processed: 15 * 60 * 1000, // the upload, at most, while TikTok shows it moving
+  stall: 25000,             // the upload with nothing recognizable on screen (no progress, no "Uploaded") → Groot looks
+  stuck: 3 * 60 * 1000,     // the upload showing the same progress this long → the creator
+  posted: 60000,            // TikTok's success notice after Post
+  creator: 2 * 60 * 1000,   // a step handed to the creator ("needs you") before this video gives up
+  ai: 40000,                // one answer from Groot (the platform's route allows 30 s)
+  cdp: 15000,               // one page script or DevTools command
+  blocker: 15 * 60 * 1000,  // a captcha or log-in the creator is doing
+  handoff: 30 * 60 * 1000,  // Manual: the creator's own Post
+};
+
+// What the creator does when Groot can't (plain words, in the TikTok window's bar and in the app).
+const STEP_HELP = {
+  upload: "Groot can't find where to upload. In the TikTok window, open Upload and choose the video yourself.",
+  wait_processed: "Groot can't tell if TikTok finished uploading. When the video shows as uploaded in the TikTok window, press Post yourself.",
+  caption: "Groot couldn't write the description. In the TikTok window, click the description box and type it yourself.",
+  product_open: "Groot can't find Add link. In the TikTok window, press Add link under the description.",
+  product_tab: "In the TikTok window, choose Products in the Add link box, then press Next.",
+  product_search: "In the TikTok window, search your showcase for the product.",
+  product_pick: "In the TikTok window, select the product in the list.",
+  product_next: "In the TikTok window, press Next in the product box.",
+  product_add: "In the TikTok window, press Add in the product box.",
+  post: "Groot can't find the Post button. Press Post in the TikTok window.",
+  confirm_posted: "Groot can't tell if it posted. Look at the TikTok window: if Post is still there, press it.",
+};
 
 // Which steps may ask Groot (their goals are a fixed table on the platform, STEP_GOALS). Never
 // product_pick by itself (the product must be the creator's: a row is checked against their words
@@ -276,7 +336,10 @@ function validateAction(a, view, values) {
 // ---- human pacing --------------------------------------------------------------------------------
 // Never an instant burst: a pause before every click, a key at a time in small chunks while typing.
 // `pace` scales everything (the harness runs at 0.15); `rand` is injectable for tests.
-const DELAYS = { beforeClick: [350, 900], afterClick: [250, 700], keyChunk: [35, 120], betweenSteps: [600, 1400], poll: [900, 1300] };
+// 2026-10-05 (Drew's first real post was "extremely slow"): small pauses, ~0.5-1.2 s around a click,
+// 0.3-0.9 s between steps. Polling only reads the page (nothing a person would see), so it is quick:
+// a step moves on as soon as TikTok is ready.
+const DELAYS = { beforeClick: [300, 700], afterClick: [200, 500], keyChunk: [25, 80], betweenSteps: [300, 900], poll: [250, 450] };
 function delay(kind, pace = 1, rand = Math.random) {
   const [lo, hi] = DELAYS[kind] || [300, 600];
   return Math.round((lo + (hi - lo) * rand()) * pace);
@@ -289,7 +352,8 @@ function chunks(text, rand = Math.random) {
 }
 
 module.exports = {
-  TIKTOK_STUDIO_URL, TIKTOK_UPLOAD_URL, PLATFORMS, TARGETS, AI_STEPS, STEP_WORDS, PRODUCT_STEPS, KEYS, MAX_AI_PER_STEP, MAX_AI_PER_POST, DELAYS, NOT_IN_SHOWCASE, PICK_AT,
+  TIKTOK_STUDIO_URL, TIKTOK_UPLOAD_URL, PLATFORMS, TARGETS, AI_STEPS, STEP_WORDS, STEP_HELP, TIMEOUTS, PRODUCT_STEPS, KEYS, MAX_AI_PER_STEP, MAX_AI_PER_POST, DELAYS, NOT_IN_SHOWCASE, PICK_AT,
+  normCaption, captionParts, showcaseList,
   isAllowedCaller, isVideoUrl, isTikTokUrl, isLoginProviderUrl, parseSource, validatePostRequest, captionText, safeFileName,
   productWords, productScore, pickProduct, searchTerms, cleanProductName,
   planSteps, validateAction, delay, chunks,

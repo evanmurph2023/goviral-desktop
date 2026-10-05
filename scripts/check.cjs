@@ -17,7 +17,7 @@ const ok = (name) => console.log(`  ok   ${name}`);
 const bad = (name, e) => { failures++; console.log(`  FAIL ${name}\n       ${e && e.message ? e.message : e}`); };
 const test = (name, fn) => { try { fn(); ok(name); } catch (e) { bad(name, e); } };
 
-const SOURCES = ["src/main.js", "src/preload.js", "src/links.js", "src/tiktok/index.js", "src/tiktok/poster.js", "src/tiktok/engine.js", "src/tiktok/page.js", "src/tiktok/window.js", "src/tiktok/rules.js", "src/tiktok/trybe.js", "src/tiktok/trybe-engine.js", "src/tiktok/files.js", "src/tiktok/drive.js", "src/tiktok/bar-preload.js", "electron-builder.config.js", "scripts/make-icons.cjs", "scripts/tiktok-unit.cjs", "scripts/tiktok-harness.cjs"];
+const SOURCES = ["src/main.js", "src/preload.js", "src/links.js", "src/tiktok/index.js", "src/tiktok/poster.js", "src/tiktok/engine.js", "src/tiktok/page.js", "src/tiktok/window.js", "src/tiktok/rules.js", "src/tiktok/trybe.js", "src/tiktok/trybe-engine.js", "src/tiktok/files.js", "src/tiktok/drive.js", "src/tiktok/transfer.js", "src/tiktok/bar-preload.js", "electron-builder.config.js", "scripts/make-icons.cjs", "scripts/tiktok-unit.cjs", "scripts/tiktok-engine-unit.cjs", "scripts/tiktok-harness.cjs"];
 
 console.log("1. parse");
 for (const f of SOURCES) {
@@ -109,7 +109,7 @@ for (const file of asarFiles) {
   const rel = path.relative(ROOT, file);
   test(`${rel}: has the app files`, () => {
     const list = asar.listPackage(file).map((p) => p.replace(/\\/g, "/"));
-    for (const need of ["/package.json", "/src/main.js", "/src/preload.js", "/src/links.js", "/src/offline.html", "/src/tiktok/index.js", "/src/tiktok/files.js", "/src/tiktok/drive.js", "/src/tiktok/bar.html", "/src/tiktok/bar-preload.js", "/assets/logo.png", "/node_modules/electron-updater/package.json"]) {
+    for (const need of ["/package.json", "/src/main.js", "/src/preload.js", "/src/links.js", "/src/offline.html", "/src/tiktok/index.js", "/src/tiktok/files.js", "/src/tiktok/drive.js", "/src/tiktok/transfer.js", "/src/tiktok/bar.html", "/src/tiktok/bar-preload.js", "/assets/logo.png", "/node_modules/electron-updater/package.json"]) {
       assert(list.includes(need), `${need} not in app.asar`);
     }
     for (const never of ["/build/icon.ico", "/scripts/check.cjs", "/test/tiktok-mock/upload.html", "/node_modules/electron/package.json", "/node_modules/electron-builder/package.json"]) {

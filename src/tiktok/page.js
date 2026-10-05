@@ -29,7 +29,8 @@ const FIND = function (arg) {
   };
   const ownText = (el) => (el.getAttribute("aria-label") || el.innerText || el.value || el.getAttribute("placeholder") || "").replace(/\s+/g, " ").trim();
   const words = (t) => t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 1);
-  for (const way of arg.ways) {
+  for (let wi = 0; wi < arg.ways.length; wi++) {
+    const way = arg.ways[wi];
     let found = null;
     if (way.css) {
       for (const el of document.querySelectorAll(way.css)) if (way.hidden || visible(el)) { found = el; break; }
@@ -57,7 +58,7 @@ const FIND = function (arg) {
     const r = found.getBoundingClientRect();
     g.els.push(found);
     const disabled = !!(found.disabled || found.getAttribute("aria-disabled") === "true" || /\bdisabled\b/i.test(found.className || ""));
-    return { ref: g.els.length - 1, x: r.left, y: r.top, w: r.width, h: r.height, disabled, text: ownText(found).slice(0, 200) };
+    return { ref: g.els.length - 1, way: wi, x: r.left, y: r.top, w: r.width, h: r.height, disabled, text: ownText(found).slice(0, 200) };
   }
   return null;
 };
@@ -131,8 +132,9 @@ const FOCUSED_IS_PASSWORD = function () {
 };
 
 class CdpPage {
-  constructor(webContents, { pace = 1, signal = null, log = () => {} } = {}) {
+  constructor(webContents, { pace = 1, signal = null, log = () => {}, cdpMs = 15000 } = {}) {
     this.wc = webContents;
+    this.cdpMs = cdpMs; // one page script may take this long; then it counts as "not found" (never a hang)
     this.dbg = webContents.debugger;
     this.pace = pace;
     this.signal = signal;
@@ -154,18 +156,33 @@ class CdpPage {
   sendWithin(ms, method, params = {}) {
     return Promise.race([this.send(method, params), new Promise((res) => setTimeout(() => res(null), ms))]);
   }
+  // A promise that rejects after ms ("the page didn't answer") instead of waiting forever.
+  within(ms, promise) {
+    let t = null;
+    return Promise.race([promise, new Promise((_res, rej) => { t = setTimeout(() => rej(new Error(`the page didn't answer in ${Math.round(ms / 1000)} s`)), ms); })]).finally(() => clearTimeout(t));
+  }
   sleep(ms) { return sleep(ms, this.signal); }
   pause(kind) { return this.sleep(delay(kind, this.pace)); }
   url() { return this.wc.isDestroyed() ? "" : this.wc.getURL(); }
 
-  async goto(url) {
+  // A page load, at most ms: TikTok Studio can keep loading for a long time, and the steps find
+  // their own way on whatever has loaded. Returns { ms, timedOut }.
+  async goto(url, ms = 30000) {
     this.world = null;
-    await this.wc.loadURL(url).catch((e) => { if (!/ERR_ABORTED/.test(String(e && e.message))) throw e; });
+    const t0 = Date.now();
+    let timer = null;
+    const load = this.wc.loadURL(url).then(() => false, (e) => { if (!/ERR_ABORTED/.test(String(e && e.message))) throw e; return false; });
+    const late = new Promise((res) => { timer = setTimeout(() => res(true), ms); });
+    try {
+      const timedOut = await Promise.race([load, late]);
+      if (timedOut) load.catch(() => {});
+      return { ms: Date.now() - t0, timedOut };
+    } finally { clearTimeout(timer); }
   }
 
   // The isolated world for the page now showing (a new document needs a new one).
   async context() {
-    const { frameTree } = await this.send("Page.getFrameTree");
+    const { frameTree } = await this.within(this.cdpMs, this.send("Page.getFrameTree"));
     const f = frameTree.frame;
     if (this.world && this.world.loaderId === f.loaderId) return this.world.id;
     const { executionContextId } = await this.send("Page.createIsolatedWorld", { frameId: f.id, worldName: WORLD, grantUniveralAccess: false });
@@ -175,7 +192,7 @@ class CdpPage {
   async run(fn, arg, byValue = true) {
     for (let attempt = 0; attempt < 2; attempt++) {
       const contextId = await this.context();
-      const r = await this.send("Runtime.evaluate", { expression: `(${fn.toString()})(${JSON.stringify(arg === undefined ? null : arg)})`, contextId, returnByValue: byValue, awaitPromise: true }).catch((e) => ({ err: e }));
+      const r = await this.within(this.cdpMs, this.send("Runtime.evaluate", { expression: `(${fn.toString()})(${JSON.stringify(arg === undefined ? null : arg)})`, contextId, returnByValue: byValue, awaitPromise: true })).catch((e) => ({ err: e }));
       if (r.err) { this.world = null; if (attempt) throw r.err; continue; } // the document changed under us
       if (r.exceptionDetails) throw new Error(`page script failed: ${r.exceptionDetails.text}`);
       return byValue ? r.result.value : r.result;
@@ -223,9 +240,10 @@ class CdpPage {
   }
 
   // Typing: a few characters at a time with small gaps. Never into a password field.
-  async type(text) {
+  // { slow: true }: one character at a time (the second try at a description TikTok mangled).
+  async type(text, { slow = false } = {}) {
     if (await this.focusedIsPassword()) throw Object.assign(new Error("TikTok wants your password. Type it yourself, Groot never does."), { needUser: "password" });
-    for (const c of chunks(text)) {
+    for (const c of slow ? [...text] : chunks(text)) {
       await this.send("Input.insertText", { text: c });
       await this.pause("keyChunk");
     }
