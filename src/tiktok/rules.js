@@ -181,6 +181,15 @@ function productScore(want, have) {
   return w.filter((x) => h.some((y) => sameWord(x, y))).length / w.length;
 }
 const PICK_AT = 0.75;
+// A product row has words: page numbers ("1", "49"), arrows, "..." and the table's header never are.
+function isProductRow(text) {
+  const t = String(text || "").replace(/s+/g, " ").trim();
+  if (t.length < 4 || /^[ds.,…<>‹›«»|/-]*$/.test(t)) return false;
+  return !/^(product( name)?|name).{0,40}(price|stock|commission|status)/i.test(t);
+}
+// How many result pages Groot turns before trying the next search: a few for each word, the whole
+// showcase for the empty search (Drew's has 49 pages; the slipper was on page 2-3, 2026-10-05).
+const SHOWCASE_PAGES = { term: 6, all: 60 };
 function pickProduct(want, rows) {
   let best = null;
   for (const r of rows || []) {
@@ -247,8 +256,14 @@ const TARGETS = {
   productsOption: [{ css: '[data-e2e="link_type_products"]' }, { text: "^products?$", within: `${DLG} [role=option], ${DLG} [role=tab], ${DLG} [role=radio], ${DLG} button, ${DLG} label, ${DLG} li` }],
   linkNext: [{ text: "^next$", within: DLG_BTN }],
   productSearch: [{ css: 'input[placeholder*="Search product" i]' }, { css: `${DLG} input[type="search"]` }, { css: `${DLG} input[placeholder*="Search" i]` }],
-  productRows: [{ css: `${DLG} [role=radio], ${DLG} [role=option], ${DLG} tbody tr, ${DLG} li` }],
-  productSelected: [{ css: `${DLG} [role=radio][aria-checked=true], ${DLG} [role=option][aria-selected=true], ${DLG} input:checked` }],
+  // The product rows, most specific first. TikTok's showcase is a table with a radio per row; the old
+  // last resort (`li`) read the PAGE NUMBERS under it as products ("1", "2", "3", "49": Drew's post,
+  // 2026-10-05) and Groot gave up on a product that was there.
+  productRows: [{ css: `${DLG} input[type=radio]`, rowOf: true }, { css: `${DLG} [role=radio]`, rowOf: true }, { css: `${DLG} [role=row]` }, { css: `${DLG} tbody tr` }, { priced: DLG }, { css: `${DLG} [role=option]` }],
+  // The showcase's pages: numbered items and a next arrow under the table.
+  // The showcase's page buttons under the table ("1", "2", "3" ... "49", and arrows with no words).
+  productPages: [{ css: `${DLG} [class*="pagination" i] li, ${DLG} [class*="pagination" i] button, ${DLG} [class*="pager" i] li, ${DLG} [class*="pager" i] button` }, { css: `${DLG} li` }],
+  productSelected: [{ css: `${DLG} input[type=radio]:checked, ${DLG} [role=radio][aria-checked=true]`, rowOf: true }, { css: `${DLG} [role=option][aria-selected=true], ${DLG} [role=row][aria-selected=true]` }],
   productNoResults: [{ text: "(no (products|results)( found)?|couldn.t find (any|that)|nothing found)", within: `${DLG} div, ${DLG} p, ${DLG} span` }],
   productNext: [{ text: "^next$", within: DLG_BTN }],
   productNameInput: [{ css: `${DLG} input[name="productName"]` }, { css: `${DLG} input[placeholder*="name" i]` }, { css: `${DLG} input[maxlength]:not([type=search])` }],
@@ -384,7 +399,7 @@ function chunks(text, rand = Math.random) {
   return out;
 }
 
-module.exports = {
+module.exports = { isProductRow, SHOWCASE_PAGES,
   TIKTOK_STUDIO_URL, TIKTOK_UPLOAD_URL, PLATFORMS, TARGETS, AI_STEPS, STEP_WORDS, STEP_HELP, TIMEOUTS, PRODUCT_STEPS, KEYS, MAX_AI_PER_STEP, MAX_AI_PER_POST, DELAYS, NOT_IN_SHOWCASE, PICK_AT,
   normCaption, captionParts, showcaseList,
   isAllowedCaller, isVideoUrl, isTikTokUrl, isLoginProviderUrl, parseSource, validatePostRequest, captionText, safeFileName,

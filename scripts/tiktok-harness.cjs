@@ -161,6 +161,7 @@ const waitUntil = async (fn, ms = 20000) => { const t = Date.now() + ms; while (
 
 let failures = 0;
 async function scenario(name, fn) {
+  if (process.env.ONLY && !process.env.ONLY.split(",").some((o) => name.startsWith(o + " "))) return; // ONLY=10,18b runs just those
   const t0 = Date.now();
   try { await fn(); console.log(`  ok   ${name} (${((Date.now() - t0) / 1000).toFixed(1)} s)`); }
   catch (e) { failures++; console.log(`  FAIL ${name}\n       ${e && e.stack ? e.stack.split("\n").slice(0, 3).join("\n       ") : e}`); }
@@ -363,7 +364,7 @@ app.whenReady().then(async () => {
     const m = await mockState(p);
     assert(m.events.includes("videos tab"), "went Upload → Videos");
     assert.strictEqual(m.caption, "comfort weekend slipper #slippers #comfort");
-    assert.deepStrictEqual(m.searches, ["Comfort slippers", "Comfort"], "the full name first, then the first word");
+    assert.deepStrictEqual(m.searches, ["Comfort slippers", "slippers", "slipper"], "the full name first, then the product word, then its singular");
     assert.strictEqual(m.product, "Comfort Weekend Slipper", "the matching row, not Cloud Comfort Slides");
     assert.strictEqual(m.productName, "Comfort Weekend Slipper", "the link name is never renamed");
     assert.strictEqual(m.playlist, "", "no playlist");
@@ -380,12 +381,12 @@ app.whenReady().then(async () => {
     const r = await p.post(job({ postId: "nf1", product: "Fuzzy Bear Earmuffs" }), (e) => events.push(e));
     assert.strictEqual(r.status, "failed");
     assert(r.error.startsWith("That product isn't in your TikTok Shop showcase"), r.error);
-    assert.match(r.error, /"Fuzzy Bear Earmuffs" or "Fuzzy"/, "says what was searched");
+    assert.match(r.error, /"Fuzzy Bear Earmuffs", "Earmuffs", "earmuff", "Bear", "Fuzzy" and the whole showcase/, "says what was searched");
     assert.strictEqual(r.code, "product_not_found");
     const m = await mockState(p);
     assert.strictEqual(m.posted, false);
     assert.strictEqual(m.product, null, "nothing else was tagged instead");
-    assert.deepStrictEqual(m.searches, ["Fuzzy Bear Earmuffs", "Fuzzy"]);
+    assert.deepStrictEqual(m.searches, ["Fuzzy Bear Earmuffs", "Earmuffs", "earmuff", "Bear", "Fuzzy", ""]);
     assert(events.some((e) => e.status === "failed" && e.code === "product_not_found"));
     await shot(p, "engine-11-not-in-showcase");
     // the half-filled page asks "leave?": the next video goes on anyway
@@ -504,6 +505,18 @@ app.whenReady().then(async () => {
     const m = await mockState(p);
     assert.strictEqual(m.caption, "the comfort weekend slipper for lazy days at home #slippers #comfort #weekendvibes #cozyathome");
     assert.strictEqual(m.eaten, 0, "never typed a space into an open hashtag list");
+    p.close();
+  });
+
+  await scenario("18b Drew's showcase (2026-10-05): a div table, drawn radios, pages; the slipper on page 3 of the search", async () => {
+    const p = makePoster("?showcase=big");
+    const r = await p.post(job({ postId: "big1", product: "comfrt weekend slippers" }));
+    assert.strictEqual(r.status, "posted", JSON.stringify(r));
+    const m = await mockState(p);
+    assert.strictEqual(m.product, "Comfrt | Weekend Slipper | Faux Suede Slip-On With Sherpa-Lin");
+    assert(m.events.includes("page 3"), m.events.join(" / ") + " :: " + r.steps.map((s) => s.step + ": " + s.how).join(" || "));
+    assert.deepStrictEqual(m.searches, ["comfrt weekend slippers"], "found without a second search");
+    await shot(p, "engine-18b-showcase-page-3");
     p.close();
   });
 

@@ -74,17 +74,51 @@ const ROWS = function (arg) {
     const s = getComputedStyle(el);
     return s.visibility !== "hidden" && s.display !== "none" && Number(s.opacity) > 0.05;
   };
+  const RADIO = "input[type=radio], [role=radio], [class*=radio i]";
+  // The row an element stands for: the nearest row-like parent, else the widest parent that still
+  // holds only this one radio (a div-built table has no tr).
+  const rowOf = (el) => {
+    let row = el.closest("label, tr, [role=row], [role=option]");
+    if (!row || (row.innerText || "").trim().length < 4) {
+      let a = el;
+      while (a.parentElement && a.parentElement !== document.body && a.parentElement.querySelectorAll(RADIO).length <= 1 && !a.parentElement.querySelector("input:not([type=radio]), button, [role=button]") && (a.parentElement.innerText || "").length < 600) a = a.parentElement;
+      row = a;
+    }
+    return row;
+  };
+  // What to press for a row: its radio when it shows one, else the row.
+  const pressOf = (row, el) => {
+    const r = el && el.tagName !== "INPUT" && visible(el) ? el : [...row.querySelectorAll(RADIO)].find(visible) || (el && el.parentElement && visible(el.parentElement) ? el.parentElement : null);
+    return r || row;
+  };
+  const out = (pairs) => pairs.slice(0, 60).map(({ row, press }) => {
+    g.els.push(press);
+    const selected = !!(row.querySelector("input:checked, [aria-checked=true], [aria-selected=true], [class*=radio i][class*=checked i]:not([class*=unchecked i])") || row.getAttribute("aria-selected") === "true" || row.getAttribute("aria-checked") === "true");
+    return { ref: g.els.length - 1, text: (row.innerText || row.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 200), selected };
+  });
   for (const way of arg.ways) {
+    if (way.priced) {
+      // Any product table: each price on screen, climbed to the widest box holding only that price.
+      const scope = [...document.querySelectorAll(way.priced)].filter(visible);
+      const priceRe = /^[$€£]\s?\d[\d,]*(\.\d{2})?$|^\d[\d,]*(\.\d{2})?\s?(USD|[$€£])$/;
+      const leaves = scope.flatMap((d) => [...d.querySelectorAll("*")]).filter((el) => !el.children.length && priceRe.test((el.textContent || "").trim()) && visible(el));
+      const rows = [];
+      for (const leaf of leaves) {
+        let a = leaf;
+        while (!a.querySelector(RADIO) && a.parentElement && !scope.includes(a.parentElement) && leaves.filter((l) => a.parentElement.contains(l)).length === 1 && !a.parentElement.querySelector("input:not([type=radio]), button, [role=button], ul, ol")) a = a.parentElement;
+        if (!rows.includes(a)) rows.push(a);
+      }
+      if (rows.length) return out(rows.map((row) => ({ row, press: pressOf(row, null) })));
+      continue;
+    }
     if (!way.css) continue;
     const all = [...document.querySelectorAll(way.css)].filter((el) => el.tagName === "INPUT" || visible(el));
     const inner = all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
     if (!inner.length) continue;
-    return inner.slice(0, 60).map((el) => {
-      const row = el.tagName === "INPUT" ? el.closest("label, li, tr, [role=row], [role=option], [role=radio]") || el.parentElement || el : el;
-      g.els.push(row);
-      const selected = el.checked === true || el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true" || !!row.querySelector("input:checked");
-      return { ref: g.els.length - 1, text: (row.innerText || row.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 200), selected };
-    });
+    if (!way.rowOf) return out(inner.map((el) => ({ row: el, press: el })));
+    const pairs = [];
+    for (const el of inner) { const row = rowOf(el); if (!pairs.some((p) => p.row === row)) pairs.push({ row, press: pressOf(row, el) }); }
+    return out(pairs);
   }
   return [];
 };
@@ -118,7 +152,10 @@ const BOX = function (arg) {
   const el = (window.__gv && window.__gv.els[arg.ref]) || null;
   if (!el || !el.isConnected) return null;
   const r = el.getBoundingClientRect();
-  if (r.top < 0 || r.bottom > innerHeight) { el.scrollIntoView({ block: "center" }); }
+  // Off screen, or under something (a dialog that scrolls inside itself keeps the showcase's page
+  // buttons below its own edge): scrolled to the middle first.
+  const under = (q) => { const e = document.elementFromPoint(q.left + q.width / 2, q.top + q.height / 2); return !e || !(e === el || el.contains(e)); };
+  if (r.top < 0 || r.bottom > innerHeight || (r.width > 0 && under(r))) { el.scrollIntoView({ block: "center" }); }
   const q = el.getBoundingClientRect();
   return { x: q.left, y: q.top, w: q.width, h: q.height };
 };

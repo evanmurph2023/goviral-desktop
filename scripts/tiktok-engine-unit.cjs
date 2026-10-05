@@ -39,9 +39,9 @@ const REF = Object.fromEntries(ORDER.map((n, i) => [n, i + 1]));
 function fakeStudio(opt = {}) {
   const o = {
     processMs: 4000, progressText: true, uploadedText: true, stuckAt: null, eat: false, eatOnce: false, showcase: SHOWCASE,
-    addLink: true, addLinkOffWhileUploading: false, prefillOnUploaded: false, postOnWhileUploading: false, fileName: "comfort slippers", ...opt,
+    addLink: true, addLinkOffWhileUploading: false, prefillOnUploaded: false, postOnWhileUploading: false, fileName: "comfort slippers", pageSize: Infinity, searchMode: "all", pageJunk: false, ...opt,
   };
-  const S = { page: null, file: null, fileAt: 0, caption: "", focused: null, suggest: false, sessions: 0, dialog: null, typeChosen: false, search: "", searched: false, rows: [], selected: null, nameValue: "", product: null, posted: false, postedAt: 0, prefilled: false, searches: [], captionAtFirstProgress: null, events: [], aborted: false };
+  const S = { page: null, file: null, fileAt: 0, caption: "", focused: null, suggest: false, sessions: 0, dialog: null, typeChosen: false, search: "", searched: false, rows: [], pageNo: 1, selected: null, nameValue: "", product: null, posted: false, postedAt: 0, prefilled: false, searches: [], captionAtFirstProgress: null, events: [], aborted: false };
   const pctRaw = () => (S.file ? Math.min(100, Math.floor(((NOW - S.fileAt) / o.processMs) * 100)) : 0);
   const pct = () => (o.stuckAt !== null ? Math.min(o.stuckAt, pctRaw()) : pctRaw());
   const uploaded = () => !!S.file && pct() >= 100;
@@ -79,7 +79,9 @@ function fakeStudio(opt = {}) {
   const doSearch = () => {
     S.searches.push(S.search);
     const words = S.search.toLowerCase().split(/\s+/).filter(Boolean);
-    S.rows = o.showcase.filter((p) => words.every((w) => p.toLowerCase().includes(w)));
+    const has = (p, w) => p.toLowerCase().includes(w);
+    S.rows = o.searchMode === "none" && words.length ? [] : o.showcase.filter((p) => (o.searchMode === "any" ? words.some((w) => has(p, w)) : words.every((w) => has(p, w))));
+    S.pageNo = 1;
     S.searched = true;
     S.selected = null;
   };
@@ -110,8 +112,13 @@ function fakeStudio(opt = {}) {
       await tick();
       const name = NAME_OF.get(ways);
       if (S.dialog !== "search") return [];
-      const all = S.rows.map((t, i) => ({ ref: 1000 + i, text: t, selected: S.selected === t }));
-      if (name === "productRows") return all;
+      const from = Number.isFinite(o.pageSize) ? (S.pageNo - 1) * o.pageSize : 0;
+      const all = S.rows.slice(from, from + o.pageSize).map((t, i) => ({ ref: 1000 + from + i, text: t, selected: S.selected === t }));
+      const pages = Math.max(1, Math.ceil(S.rows.length / o.pageSize));
+      const buttons = pages > 1 ? [...Array.from({ length: Math.min(pages, 3) }, (_, i) => String(i + 1)), String(pages), ""].map((t, i) => ({ ref: 2000 + i, text: t, selected: false })) : [];
+      // TikTok's page numbers read as rows by a loose selector (Drew's post, 2026-10-05)
+      if (name === "productRows") return o.pageJunk ? [...all, ...buttons] : all;
+      if (name === "productPages") return buttons;
       if (name === "productSelected") return all.filter((r) => r.selected);
       return [];
     },
@@ -125,7 +132,12 @@ function fakeStudio(opt = {}) {
       await page.pause("beforeClick");
       settle();
       const name = ORDER.find((n) => REF[n] === ref);
-      if (ref >= 1000) { S.selected = S.rows[ref - 1000] || null; S.events.push(`selected ${S.selected}`); }
+      if (ref >= 2000) {
+        const pages = Math.max(1, Math.ceil(S.rows.length / o.pageSize));
+        const btn = [...Array.from({ length: Math.min(pages, 3) }, (_, i) => String(i + 1)), String(pages), ""][ref - 2000];
+        S.pageNo = btn ? Number(btn) : Math.min(pages, S.pageNo + 1);
+        S.events.push(`page ${S.pageNo}`);
+      } else if (ref >= 1000) { S.selected = S.rows[ref - 1000] || null; S.events.push(`selected ${S.selected}`); }
       else if (name === "captionBox") S.focused = "caption";
       else if (name === "addLink" || name === "attachLink") { if (!disabled("addLink")) { S.dialog = "type"; S.typeChosen = false; } }
       else if (name === "productsOption") S.typeChosen = true;
@@ -338,6 +350,37 @@ test("showcase search, many results, none confident, nobody picks: failed produc
   assert.strictEqual(r.code, "product_not_found");
   assert(r.error.startsWith(`${R.NOT_IN_SHOWCASE}. TikTok showed "Comfort Weekend Slipper"`), r.error);
   assert(NOW - t0 < R.TIMEOUTS.creator + 40000);
+});
+
+test("Drew's slipper (2026-10-05): page numbers aren't products, the search goes to page 3 of the results", async () => {
+  const filler = Array.from({ length: 24 }, (_, i) => `Weekend Bag ${i + 1} Canvas Tote`);
+  const want = "Comfrt | Weekend Slipper | Faux Suede Slip-On With Sherpa-Lin";
+  const { r, S, groot } = await run({ showcase: [...filler, want, "Cloud Comfort Slides"], pageSize: 10, searchMode: "any", pageJunk: true }, { job: { product: "comfrt weekend slippers" } });
+  assert.strictEqual(r.status, "posted", JSON.stringify(r));
+  assert.strictEqual(S.product, want);
+  assert.deepStrictEqual(S.searches, ["comfrt weekend slippers"], "found on the first search's pages");
+  assert(S.events.includes("page 3"), S.events.join(" / "));
+  assert(/"comfrt weekend slippers" page 3/.test(r.steps.find((s) => s.step === "product_pick").how));
+  assert.strictEqual(groot.calls.length, 0);
+});
+
+test("TikTok's search finds nothing for any word: the whole showcase, page by page", async () => {
+  const filler = Array.from({ length: 37 }, (_, i) => `Item ${i + 1} Thing`);
+  const want = "Comfrt Weekend Slipper";
+  const { r, S, groot } = await run({ showcase: [...filler, want, "Cloud Comfort Slides"], pageSize: 10, searchMode: "none" }, { job: { product: "Comfort weekend slippers" } });
+  assert.strictEqual(r.status, "posted", JSON.stringify(r));
+  assert.strictEqual(S.product, want);
+  assert.strictEqual(S.searches[S.searches.length - 1], "", "the whole showcase last");
+  assert(S.events.includes("page 4"), S.events.join(" / "));
+  assert.strictEqual(groot.calls.length, 0);
+});
+
+test("a showcase with pages and nothing like it: every page once, then not in showcase", async () => {
+  const filler = Array.from({ length: 30 }, (_, i) => `Item ${i + 1} Thing`);
+  const { r, S } = await run({ showcase: filler, pageSize: 10, searchMode: "none" }, { job: { product: "Fuzzy Bear Earmuffs" } });
+  assert.strictEqual(r.status, "failed");
+  assert.strictEqual(r.code, "product_not_found");
+  assert(S.events.filter((e) => e === "page 3").length >= 1 && S.events.filter((e) => e.startsWith("page ")).length < 10, S.events.join(" / "));
 });
 
 test("a step that never appears (Add link): Groot within TIMEOUTS.find, clicks the changed button, posted", async () => {

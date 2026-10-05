@@ -47,6 +47,9 @@
   label.f { display: block; margin-top: 14px; font-weight: 600; }
   label.f select, label.f input { display: block; margin-top: 6px; padding: 8px; width: 320px; }
   [role=dialog] { position: fixed; inset: 0; margin: auto; width: 480px; height: 440px; background: #fff; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.25); padding: 20px; box-sizing: border-box; overflow: auto; }
+  .trow { display: flex; gap: 10px; align-items: center; padding: 8px; border-bottom: 1px solid #eee; } .trow .cell { display: flex; gap: 6px; }
+  .tux-radio { display: inline-block; width: 14px; height: 14px; border: 2px solid #999; border-radius: 50%; cursor: pointer; } .tux-radio-checked { border-color: #fe2c55; background: #fe2c55; }
+  .tux-pagination { display: flex; gap: 8px; list-style: none; padding: 0; } .tux-pagination li { min-width: 14px; min-height: 14px; padding: 4px; cursor: pointer; } .tux-pagination .active { font-weight: bold; }
   [role=option], [role=radio] { padding: 10px; border: 1px solid #eee; border-radius: 6px; margin: 6px 0; cursor: pointer; }
   [aria-checked=true], [aria-selected=true] { border-color: #fe2c55; background: #fff0f3; }
   .err { color: #e11d48; font-size: 13px; margin-top: 6px; }
@@ -143,7 +146,15 @@
   const M = (window.__mock = { variant: changed ? "changed" : "normal", page: null, file: null, size: 0, caption: null, product: null, productName: null, nameErrors: 0, searches: [], playlist: null, location: null, privacy: null, posted: false, events: [], uploadPct: 0, captionTypedPct: null, eaten: 0, rewritten: 0 });
   const ev = (e) => M.events.push(e);
   // The creator's showcase. One title has an emoji and a symbol TikTok won't take as a link name.
-  const PRODUCTS = ["Comfort Weekend Slipper", "Cloud Comfort Slides", "Hydro Flask 40 oz Tumbler", "Stanley Quencher H2.0 40 oz", "Glow Serum ✨ Vitamin C ★ 30ml"];
+  // ?showcase=big is built like TikTok's real one (Drew's, 2026-10-05): a div table with a header,
+  // drawn radios (no role, no input), prices, 5 to a page with numbered pages under it, and a
+  // search that matches ANY word, so "comfrt weekend slippers" lists every "weekend" product and
+  // his slipper sits on page 3.
+  const BIG = q.get("showcase") === "big";
+  const PRODUCTS = BIG
+    ? [...Array.from({ length: 11 }, (_, i) => `Weekend Duffel Bag No. ${i + 1} Canvas`), "Cloud Comfort Slides", "Comfrt | Weekend Slipper | Faux Suede Slip-On With Sherpa-Lin", ...Array.from({ length: 20 }, (_, i) => `Kitchen Thing ${i + 1}`)]
+    : ["Comfort Weekend Slipper", "Cloud Comfort Slides", "Hydro Flask 40 oz Tumbler", "Stanley Quencher H2.0 40 oz", "Glow Serum ✨ Vitamin C ★ 30ml"];
+  let pageNo = 1, lastHits = [];
   const INVALID = /[^\p{L}\p{N} '&.,-]/u;
   let dirty = false;
   window.addEventListener("beforeunload", (e) => { if (dirty && !M.posted) { e.preventDefault(); e.returnValue = ""; } });
@@ -259,13 +270,40 @@
   function renderRows(term) {
     const box = $("rows"); box.innerHTML = ""; picked = null; $("next2").disabled = true;
     const words = term.toLowerCase().split(/\s+/).filter(Boolean);
-    const hits = PRODUCTS.filter((p) => words.every((w) => p.toLowerCase().includes(w)));
+    const hits = PRODUCTS.filter((p) => (BIG ? !words.length || words.some((w) => p.toLowerCase().includes(w)) : words.every((w) => p.toLowerCase().includes(w))));
+    if (BIG) { lastHits = hits; pageNo = 1; return renderBig(); }
     if (!hits.length) { const n = document.createElement("p"); n.textContent = "No products found"; box.appendChild(n); return; }
     for (const p of hits) {
       const r = document.createElement("div");
       r.setAttribute("role", "radio"); r.setAttribute("aria-checked", "false"); r.textContent = p;
       r.onclick = () => { picked = p; for (const o of box.children) o.setAttribute("aria-checked", String(o === r)); $("next2").disabled = false; };
       box.appendChild(r);
+    }
+  }
+  function renderBig() {
+    const box = $("rows"); box.innerHTML = ""; picked = null; $("next2").disabled = true;
+    if (!lastHits.length) { const n = document.createElement("p"); n.textContent = "No products found"; box.appendChild(n); return; }
+    const head = document.createElement("div"); head.className = "thead"; head.innerHTML = "<span>Product name</span> <span>Price</span> <span>Stock</span>"; box.appendChild(head);
+    const body = document.createElement("div"); box.appendChild(body);
+    for (const p of lastHits.slice((pageNo - 1) * 5, pageNo * 5)) {
+      const r = document.createElement("div"); r.className = "trow";
+      r.innerHTML = '<span class="tux-radio"></span><div class="cell"><div><div class="pname"></div><div class="pid">ID 17299</div></div></div><div class="cell"><span>$35.00</span></div><div class="cell"><span>120</span></div>';
+      r.querySelector(".pname").textContent = p;
+      const dot = r.querySelector(".tux-radio");
+      dot.onclick = () => { picked = p; for (const o of body.querySelectorAll(".tux-radio")) o.className = o === dot ? "tux-radio tux-radio-checked" : "tux-radio"; $("next2").disabled = false; ev("picked " + p); };
+      body.appendChild(r);
+    }
+    const pages = Math.ceil(lastHits.length / 5);
+    if (pages > 1) {
+      const ul = document.createElement("ul"); ul.className = "tux-pagination";
+      const items = [...Array.from({ length: Math.min(pages, 3) }, (_, i) => String(i + 1)), ...(pages > 3 ? ["…", String(pages)] : []), ""];
+      for (const t of items) {
+        const li = document.createElement("li"); li.textContent = t; if (t === String(pageNo)) li.className = "active";
+        if (!t) li.innerHTML = '<svg width="10" height="10"><path d="M2 1l5 4-5 4"/></svg>';
+        li.onclick = () => { if (t === "…") return; pageNo = t ? Number(t) : Math.min(pages, pageNo + 1); ev("page " + pageNo); renderBig(); };
+        ul.appendChild(li);
+      }
+      box.appendChild(ul);
     }
   }
   $("search").addEventListener("input", () => renderRows($("search").value));

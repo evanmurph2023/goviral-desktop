@@ -42,7 +42,7 @@
 // error, code, step, steps, ms, aiSteps }.
 "use strict";
 
-const { TARGETS, AI_STEPS, STEP_WORDS, STEP_HELP, TIMEOUTS, MAX_AI_PER_STEP, MAX_AI_PER_POST, NOT_IN_SHOWCASE, planSteps, validateAction, captionText, captionParts, normCaption, showcaseList, pickProduct, searchTerms, cleanProductName, productScore, PICK_AT, TIKTOK_UPLOAD_URL } = require("./rules");
+const { TARGETS, AI_STEPS, STEP_WORDS, STEP_HELP, TIMEOUTS, MAX_AI_PER_STEP, MAX_AI_PER_POST, NOT_IN_SHOWCASE, planSteps, validateAction, captionText, captionParts, normCaption, showcaseList, pickProduct, searchTerms, isProductRow, SHOWCASE_PAGES, cleanProductName, productScore, PICK_AT, TIKTOK_UPLOAD_URL } = require("./rules");
 
 class StepMissed extends Error {}
 class Failed extends Error { constructor(message, code) { super(message); this.code = code || null; } }
@@ -277,27 +277,46 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
   // Type one term into the product search, then wait for the rows to settle (changed from what was
   // there before, or still for a moment) or TikTok's "no products".
   const sigOf = (rows) => rows.map((r) => r.text).join("|");
-  async function search(term) {
-    tried.add(term.toLowerCase());
-    const before = sigOf(await safeRows("productRows"));
-    await click("productSearch");
-    await page.clearFocused();
-    await page.type(term);
-    await page.key("Enter");
+  const productRows = async () => (await safeRows("productRows")).filter((r) => isProductRow(r.text));
+  // Wait for the rows to change from `before` and hold still (or for a moment, or "no products").
+  async function settle(before) {
     const t0 = Date.now();
     const until = t0 + T.results;
     let last = null;
     let rows = [];
     for (;;) {
       await page.sleep(300);
-      rows = await safeRows("productRows");
+      rows = await productRows();
       if (!rows.length && (await visible("productNoResults"))) break;
       const sig = sigOf(rows);
       if (rows.length && sig === last && (sig !== before || Date.now() - t0 > 1500)) break;
       last = sig;
       if (Date.now() > until) break;
     }
-    note(`searched "${term}": ${rows.length ? `${rows.length} row(s): ${showcaseList(rows, 4)}` : "no products"} (${secs(Date.now() - t0)})`);
+    return { rows, ms: Date.now() - t0 };
+  }
+  async function search(term) {
+    tried.add(term.toLowerCase());
+    const before = sigOf(await productRows());
+    await click("productSearch");
+    await page.clearFocused();
+    await page.type(term);
+    await page.key("Enter");
+    const { rows, ms } = await settle(before);
+    note(`searched "${term}": ${rows.length ? `${rows.length} row(s): ${showcaseList(rows, 4)}` : "no products"} (${secs(ms)})`);
+    return rows;
+  }
+  // The results' next page: the page button one past `n`, else the last wordless one (the arrow).
+  // Null on the last page (nothing moved).
+  async function nextPage(n) {
+    const pages = await safeRows("productPages");
+    const btn = pages.find((p) => p.text === String(n + 1)) || [...pages].reverse().find((p) => !p.text);
+    if (!btn) { note(`no page ${n + 1} (page buttons: ${pages.map((p) => `"${p.text}"`).join(" ") || "none"})`); return null; }
+    const before = sigOf(await productRows());
+    await page.clickRef(btn.ref);
+    const { rows } = await settle(before);
+    if (!rows.length || sigOf(rows) === before) { note(`pressed "${btn.text || "next"}": page ${n + 1} didn't load`); return null; }
+    note(`page ${n + 1}: ${rows.length} row(s): ${showcaseList(rows, 3)}`);
     return rows;
   }
   const noResults = () => visible("productNoResults");
@@ -380,22 +399,31 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     },
     async product_search(job) { await search(searchTerms(job.product)[0]); },
     async product_pick(job) {
+      // Every search term, and every page of its results, before Groot says the product isn't there.
       const terms = searchTerms(job.product);
       const seen = [];
       for (const term of terms) {
-        const rows = tried.has(term.toLowerCase()) ? await safeRows("productRows") : await search(term);
-        seen.push(...rows);
-        const best = pickProduct(job.product, rows);
-        if (best) {
-          note(`picked "${short(best.text, 60)}" (score ${best.score.toFixed(2)}, ${rows.length} row(s))`);
-          await page.clickRef(best.ref);
-          await page.pause("afterClick");
-          if (!(await CHECK.product_pick(job))) throw new StepMissed("the picked row didn't show as selected");
-          return;
+        let rows = tried.has(term.toLowerCase()) ? await productRows() : await search(term);
+        const most = term ? SHOWCASE_PAGES.term : SHOWCASE_PAGES.all;
+        for (let p = 1; ; p++) {
+          seen.push(...rows);
+          const best = pickProduct(job.product, rows);
+          if (best) {
+            note(`picked "${short(best.text, 60)}" (score ${best.score.toFixed(2)}, "${term}" page ${p})`);
+            await page.clickRef(best.ref);
+            await page.pause("afterClick");
+            if (!(await CHECK.product_pick(job))) throw new StepMissed("the picked row didn't show as selected");
+            return;
+          }
+          if (!rows.length || p >= most) { if (rows.length) note(`"${term}": no match in ${p} page(s)`); break; }
+          const more = await nextPage(p);
+          if (!more) break;
+          rows = more;
         }
-        // nothing on screen at all and no "no products" either: the list moved, not the product
-        if (!rows.length && term && !(await noResults())) throw new StepMissed("no product rows and no 'no products' notice");
       }
+      // Not one product row on any search, the whole showcase included: the list is built in a way
+      // Groot doesn't read, not an empty showcase. The AI looks at the page.
+      if (!seen.length) throw new StepMissed("no product rows on any search");
       const typed = terms.filter(Boolean).map((t) => `"${t}"`).join(", ");
       // Only rows that share a word with the product are worth asking about; a showcase with
       // nothing like it means the product isn't there, said at once.
@@ -477,7 +505,7 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     product_tab: async () => visible("productSearch"),
     product_search: async () => (await safeRows("productRows")).length > 0 || noResults(),
     // the selected row must be the creator's product, whoever clicked it
-    product_pick: async (job) => (await safeRows("productSelected")).some((r) => productScore(job.product, r.text) >= PICK_AT),
+    product_pick: async (job) => [...(await safeRows("productSelected")), ...(await productRows()).filter((r) => r.selected)].some((r) => productScore(job.product, r.text) >= PICK_AT),
     product_next: async () => (await visible("productNameInput")) || (await visible("productAdd")) || !(await visible("dialog")),
     product_add: async () => !(await visible("dialog")),
     post: async () => (await isPosted()) || (await visible("postNowDialog")),
@@ -486,7 +514,7 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
   // When the creator does a step: what counts as done (the product they pick is their choice).
   const CREATOR_CHECK = {
     upload: async () => visible("fileInput"), // Groot attaches the file itself once the upload area shows
-    product_pick: async () => (await safeRows("productSelected")).length > 0,
+    product_pick: async () => (await safeRows("productSelected")).length > 0 || (await productRows()).some((r) => r.selected),
     wait_processed: async () => (await CHECK.wait_processed()) || (await isPosted()),
   };
 
