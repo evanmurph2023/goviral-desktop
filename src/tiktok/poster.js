@@ -6,6 +6,7 @@
 // (scripts/tiktok-harness.cjs), which points it at a local mock of TikTok Studio.
 // Trybe (2026-10-05): a job with platform "trybe" goes through the Trybe window (its own session,
 // persist:trybe, where the creator signed in) and the Trybe engine (trybe-engine.js).
+// Reads (2026-10-05): read() runs read-engine.js in the same windows, one at a time with posts.
 "use strict";
 
 const fs = require("fs");
@@ -16,6 +17,7 @@ const { saveBody } = require("./transfer");
 const { CdpPage } = require("./page");
 const { createEngine } = require("./engine");
 const { createTrybeEngine } = require("./trybe-engine");
+const { createReadEngine } = require("./read-engine");
 const { TRYBE_ORIGIN } = require("./trybe");
 const { STEP_WORDS, safeFileName, TIKTOK_UPLOAD_URL } = require("./rules");
 
@@ -158,8 +160,44 @@ function createPoster({ electron, log = () => {}, groot, fetchVideo, files = nul
     }
   }
 
+  // Groot READS the creator's account (read-engine.js): their own TikTok / Trybe window, the same
+  // one-at-a-time as posting, blockers wait for the creator ("wait"). Navigation and reading only.
+  // req = reads.js validateReadRequest's value: { read, platform, params, readId? }.
+  async function read(req, onProgress = () => {}) {
+    if (current) return { status: "failed", error: "Groot is busy in a window right now. One at a time.", code: "busy" };
+    const abort = new AbortController();
+    current = { abort, handedBack: false };
+    const kind = req.platform === "trybe" ? "trybe" : "tiktok";
+    const w = ensureWindow(kind);
+    const title = req.read === "trybe_brands" ? "Groot is reading your Trybe brands" : req.read === "trybe_brand" ? "Groot is reading a Trybe brand" : "Groot is reading your recent TikTok posts";
+    const report = (p) => {
+      const evt = { status: p.status || "reading", step: p.step || null, message: p.message || "", reason: p.reason || null, ai: !!p.ai, code: p.code || null, read: req.read };
+      w.setStatus({ title, line: evt.message, status: evt.status });
+      try { onProgress(evt); } catch { /* the app's problem */ }
+    };
+    if (show) w.focus();
+    let page = null;
+    try {
+      page = new CdpPage(w.contents, { pace, signal: abort.signal, log });
+      page.attach();
+      let tiktokBase = "https://www.tiktok.com";
+      try { tiktokBase = new URL(target()).origin; } catch { /* the default */ }
+      const engine = createReadEngine({ page, groot, report, trybeBase: trybeBase(), tiktokBase, timeouts, log, blockerMode: "wait" });
+      return await engine.run(req);
+    } catch (e) {
+      if (abort.signal.aborted) { report({ status: "stopped", message: "Stopped" }); return { status: "stopped" }; }
+      log("read error", e);
+      report({ status: "failed", message: "Something went wrong while reading." });
+      return { status: "failed", error: "Something went wrong while reading." };
+    } finally {
+      if (page) page.detach();
+      current = null;
+    }
+  }
+
   return {
     post,
+    read,
     stop() { if (current) current.abort.abort(); },
     busy: () => !!current,
     // Open the window on TikTok Studio (or Trybe's creator portal) so the creator signs in there

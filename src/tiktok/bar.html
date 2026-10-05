@@ -40,9 +40,9 @@
     $("title").textContent = String(s.title || "Groot");
     $("line").textContent = String(s.line || "");
     const st = String(s.status || "posting");
-    $("bar").className = "bar" + (st === "needs_you" || st === "ready" ? " wait" : st === "posted" ? " done" : st === "failed" || st === "stopped" ? " bad" : "");
+    $("bar").className = "bar" + (st === "needs_you" || st === "ready" ? " wait" : (st === "posted" || st === "done") ? " done" : st === "failed" || st === "stopped" ? " bad" : "");
     $("next").hidden = st !== "ready";
-    $("stop").hidden = st === "posted" || st === "failed" || st === "stopped";
+    $("stop").hidden = st === "posted" || st === "done" || st === "failed" || st === "stopped";
   });
 </script>
 </body>
