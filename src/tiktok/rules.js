@@ -196,6 +196,8 @@ const TARGETS = {
   posted: [{ text: "(everyone can see this|your video (has been|is being|was) (posted|published|uploaded)|video (posted|published)|manage your posts|high[- ]quality (version|upload))", within: "div, span, p, h1, h2, h3" }],
   captcha: [{ css: '#captcha-verify-image, .captcha_verify_container, .captcha-verify-container, [class*="captcha_verify"], [id*="captcha-verify"], iframe[src*="captcha"]' }, { text: "(drag the (slider|puzzle)|verify to continue|select 2 objects that are the same shape)", within: "div, span, p" }],
   login: [{ css: '[data-e2e="login-modal"], [data-e2e="login-title"]' }, { text: "^log in to tiktok$", within: "h1, h2, div, span" }],
+  // TikTok pushing back on the account (the cloud poster backs off for a day; never retries into a ban)
+  spam: [{ text: "(you.re posting too (fast|often)|too many (posts|uploads|attempts|requests)|account (is |was |has been )?(banned|suspended|restricted)|temporarily (restricted|blocked|unable))", within: "div, span, p, h1, h2, h3" }],
 };
 
 // The steps of one post. Manual stops on the filled-in page (handoff) and watches for the creator's
