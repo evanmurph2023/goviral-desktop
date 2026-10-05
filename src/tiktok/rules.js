@@ -1,6 +1,7 @@
 // Groot posts to TikTok: the pure rules (no Electron, no network), so scripts/tiktok-unit.cjs can
 // prove them with plain Node.
 //   - what the app may ask for (validatePostRequest) and who may ask (isAllowedCaller)
+//   - where it goes (platform: tiktok | trybe; Trybe's own rules are in trybe.js)
 //   - which addresses the TikTok window may show (isTikTokUrl, isLoginProviderUrl)
 //   - where a video may come from (parseSource: a GoViral export, a file the creator chose, Drive)
 //   - the scripted steps for one post (planSteps) and the selectors they try (TARGETS)
@@ -14,6 +15,8 @@
 const TIKTOK_STUDIO_URL = "https://www.tiktok.com/tiktokstudio";
 const TIKTOK_UPLOAD_URL = `${TIKTOK_STUDIO_URL}/upload`;
 const MODES = ["auto", "manual"];
+// Where a post goes (2026-10-05): TikTok (this file's engine.js) or Trybe (trybe.js, trybe-engine.js).
+const PLATFORMS = ["tiktok", "trybe"];
 
 // ---- callers and inputs ----------------------------------------------------------------------
 
@@ -85,12 +88,17 @@ function validatePostRequest(raw, { allowLocal = false } = {}) {
   if (src.error) return { ok: false, error: src.error };
   const mode = MODES.includes(raw.mode) ? raw.mode : null;
   if (!mode) return { ok: false, error: "Pick Auto or Manual." };
+  const platform = raw.platform === undefined || raw.platform === null ? "tiktok" : PLATFORMS.includes(raw.platform) ? raw.platform : null;
+  if (!platform) return { ok: false, error: "Post it where?" };
+  // Trybe: the brand the creator picked in "My brands" (never empty, never guessed). TikTok: none.
+  const brand = platform === "trybe" ? str(raw.brand, 120).replace(/[<>{}]/g, "").trim() || null : null;
+  if (platform === "trybe" && !brand) return { ok: false, error: "Which Trybe brand is it for?" };
   const caption = str(raw.caption, 300).replace(/\s*[—–]\s*/g, ", ");
   const hashtags = Array.isArray(raw.hashtags) ? raw.hashtags.map((h) => str(h, 41).replace(/^#/, "")).filter((h) => HASHTAG.test(h)).slice(0, 5) : [];
-  const product = raw.product === null || raw.product === undefined ? null : str(raw.product, 80) || null;
+  const product = platform === "trybe" || raw.product === null || raw.product === undefined ? null : str(raw.product, 80) || null;
   const name = str(raw.name, 120) || "GoViral video";
   const source = src.source;
-  return { ok: true, value: { postId, source, videoUrl: source.kind === "url" ? source.url : null, mode, caption, hashtags, product, name } };
+  return { ok: true, value: { postId, source, videoUrl: source.kind === "url" ? source.url : null, mode, caption, hashtags, product, name, platform, brand } };
 }
 
 // The text that goes into TikTok's description box: the caption, then the hashtags ("comfort
@@ -281,7 +289,7 @@ function chunks(text, rand = Math.random) {
 }
 
 module.exports = {
-  TIKTOK_STUDIO_URL, TIKTOK_UPLOAD_URL, TARGETS, AI_STEPS, STEP_WORDS, PRODUCT_STEPS, KEYS, MAX_AI_PER_STEP, MAX_AI_PER_POST, DELAYS, NOT_IN_SHOWCASE, PICK_AT,
+  TIKTOK_STUDIO_URL, TIKTOK_UPLOAD_URL, PLATFORMS, TARGETS, AI_STEPS, STEP_WORDS, PRODUCT_STEPS, KEYS, MAX_AI_PER_STEP, MAX_AI_PER_POST, DELAYS, NOT_IN_SHOWCASE, PICK_AT,
   isAllowedCaller, isVideoUrl, isTikTokUrl, isLoginProviderUrl, parseSource, validatePostRequest, captionText, safeFileName,
   productWords, productScore, pickProduct, searchTerms, cleanProductName,
   planSteps, validateAction, delay, chunks,

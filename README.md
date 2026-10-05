@@ -247,3 +247,32 @@ Add link → Products → Next → search the showcase → select → Next → A
 A product that is not in the showcase stops that video ("That product isn't in your TikTok Shop
 showcase", code product_not_found) and the app goes on with the others. The product link name is
 never renamed; only characters TikTok refuses are taken out.
+
+## Groot sends to Trybe (2026-10-05)
+
+Trybe (jointrybe.com, "like TikTok Shop for UGC ads": a brand approves a creator's video and runs it as a
+Meta ad) goes through the same bridge. The app asks
+`window.goviralDesktop.trybe.post({ postId, source | videoUrl, name, brand, caption, hashtags, mode })`
+(the same as `tiktok.post({ ..., platform: "trybe", brand })`); `trybe.open()` shows the Trybe window so
+the creator signs in there once; `goviralDesktop.platforms` is `["tiktok", "trybe"]`.
+
+- **The Trybe window**: the same window and bar, its own persistent session `persist:trybe`, only
+  jointrybe.com (and sup.jointrybe.com, its sign-in service). Trybe signs in with an email and a password:
+  the creator types them into Trybe's own page; Groot never sees or types them.
+- **Scripted steps** (src/tiktok/trybe.js TRYBE_TARGETS, trybe-engine.js): the creator portal (/creator) →
+  My brands → the brand (matched by the creator's words, "View All" and the Brands page with their search
+  when it isn't on Home) → Create content (or Trybe's own `?createContent=true` link) → Single submission
+  → the video (the form's hidden file input) → wait for the upload → the caption ("caption #tags") →
+  Submit → Trybe's confirmation, with the submission id when the page shows one.
+- **AI fallback** for every step but the first (`/api/groot-post/next-action` with `platform: "trybe"`
+  and the `trybe_*` steps; the platform needs their goals, see goviral-platform poster/README.md).
+- **Stops**: a brand the creator doesn't have stops that video ("That brand isn't in your Trybe brands",
+  code brand_not_found). A captcha or Trybe's sign-in page pauses for the creator (the cloud poster stops
+  with captcha / login instead); Trybe limiting the account stops with rate_limited. Groot never ticks
+  Trybe's content-rights / terms boxes or picks a category: if Submit stays off until one is chosen, the
+  bar asks the creator and Groot carries on once Submit is on.
+- **Manual** stops on the filled-in form and watches for the creator's own Submit.
+
+Everything past "My brands" is matched by words (built against a local mock in goviral-platform
+poster/test/mock/trybe.html, never against the real site). The first real run in Manual will show what
+Trybe's dialog really says; the AI fallback covers the rest.

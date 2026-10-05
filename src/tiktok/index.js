@@ -2,12 +2,14 @@
 // the preload (window.goviralDesktop.tiktok / .files / .drive); every call is checked here: it must
 // come from the app itself (<APP_ORIGIN>/desktop), and every field is validated (rules.js).
 //
-//   gvd:tiktok:post   { postId, source | videoUrl, name, product, caption, hashtags, mode }
+//   gvd:tiktok:post   { postId, source | videoUrl, name, product, caption, hashtags, mode, platform?, brand? }
 //                     source = { kind: "url", url } | { kind: "file", fileId } | { kind: "drive", fileId }
-//                     → { ok, status: posted | ready | failed | stopped, error?, code? }
+//                     platform = "tiktok" (default) | "trybe"; a Trybe post names the brand (no product)
+//                     → { ok, status: posted | ready | failed | stopped, error?, code?, submissionId? }
 //                     progress: "gvd:tiktok:progress" { postId, status, step, message, reason, ai, code }
 //   gvd:tiktok:stop   → stops the post running now
 //   gvd:tiktok:open   → shows the TikTok window (to log in once, ahead of the first post)
+//   gvd:trybe:open    → shows the Trybe window (the creator signs in to Trybe there, once)
 //
 // The creator's finished videos (src/tiktok/files.js): only folders they picked, only files they dropped.
 //   gvd:files:roots                       → [{ id, name, path, remembered, missing }]
@@ -27,6 +29,7 @@ const { createPoster, makeGrootClient } = require("./poster");
 const { createFileRegistry } = require("./files");
 const { createDriveClient } = require("./drive");
 const { isAllowedCaller, validatePostRequest, TIKTOK_UPLOAD_URL } = require("./rules");
+const { TRYBE_ORIGIN } = require("./trybe");
 
 const isId = (v, re) => typeof v === "string" && re.test(v);
 const ROOT_ID = /^r_[A-Za-z0-9_-]{8,40}$/;
@@ -40,6 +43,7 @@ function setUpTikTok({ electron, appOrigin, log, icon, overrides = {} }) {
   const dev = !app.isPackaged;
   const allowLocal = dev && process.env.GOVIRAL_TIKTOK_LOCAL === "1";
   const uploadUrl = (dev && process.env.GOVIRAL_TIKTOK_UPLOAD_URL) || TIKTOK_UPLOAD_URL;
+  const trybeUrl = (dev && allowLocal && process.env.GOVIRAL_TRYBE_URL) || TRYBE_ORIGIN;
   const o = dev ? overrides : {};
   // The platform, with the app's own sign-in cookie (the default session).
   const platformFetch = (url, init) => session.defaultSession.fetch(url, { ...init, credentials: "include" });
@@ -62,7 +66,7 @@ function setUpTikTok({ electron, appOrigin, log, icon, overrides = {} }) {
   });
 
   const poster = createPoster({
-    electron, log, icon, allowLocal, uploadUrl: (dev && o.uploadUrl) || uploadUrl, files, drive,
+    electron, log, icon, allowLocal, uploadUrl: (dev && o.uploadUrl) || uploadUrl, trybeUrl: (dev && o.trybeUrl) || trybeUrl, files, drive,
     userAgent: app.userAgentFallback,
     // The AI fallback goes to our platform with the app's own sign-in cookie.
     groot: makeGrootClient({ origin: appOrigin, fetchImpl: platformFetch }),
@@ -82,13 +86,14 @@ function setUpTikTok({ electron, appOrigin, log, icon, overrides = {} }) {
     if (!v.ok) return { ok: false, status: "failed", error: v.error };
     if (poster.busy()) return { ok: false, status: "failed", error: "Groot is already posting. One at a time.", code: "busy" };
     const job = v.value;
-    log("tiktok post start", job.postId, job.mode, job.source.kind, job.product ? "product" : "no product");
+    log("tiktok post start", job.postId, job.platform, job.mode, job.source.kind, job.platform === "trybe" ? "brand" : job.product ? "product" : "no product");
     const r = await poster.post(job, (p) => { if (!e.sender.isDestroyed()) e.sender.send("gvd:tiktok:progress", { postId: job.postId, ...p }); });
     log("tiktok post end", job.postId, r.status, r.code || "", r.error || "");
-    return { ok: r.status === "posted" || r.status === "ready", postId: job.postId, status: r.status, error: r.error || null, code: r.code || null, aiSteps: r.aiSteps || 0 };
+    return { ok: r.status === "posted" || r.status === "ready", postId: job.postId, platform: job.platform, status: r.status, error: r.error || null, code: r.code || null, aiSteps: r.aiSteps || 0, submissionId: r.submissionId || null };
   }, { ok: false, status: "failed", error: "Not allowed." });
   handle("gvd:tiktok:stop", () => { poster.stop(); return true; }, false);
-  handle("gvd:tiktok:open", () => { poster.openWindow(); return true; }, false);
+  handle("gvd:tiktok:open", () => { poster.openWindow("tiktok"); return true; }, false);
+  handle("gvd:trybe:open", () => { poster.openWindow("trybe"); return true; }, false);
 
   // ---- the creator's folders and files ----
   handle("gvd:files:roots", () => files.list(), []);

@@ -233,6 +233,92 @@ test("typing goes out in chunks of 1 to 4 characters, nothing lost", () => {
   }
 });
 
+console.log("Trybe (trybe.js): where a post goes, the brand, the saved login, the steps");
+const TR = require(path.join(__dirname, "..", "src", "tiktok", "trybe.js"));
+test("a post names its platform; Trybe needs the brand and never takes a product", () => {
+  const base = { postId: "p1", mode: "auto", videoUrl: "https://a.public.blob.vercel-storage.com/x.mp4", caption: "Healing fast", hashtags: ["tattoo"] };
+  assert.strictEqual(R.validatePostRequest(base).value.platform, "tiktok", "no platform = TikTok (the app before 2026-10-05)");
+  assert.strictEqual(R.validatePostRequest(base).value.brand, null);
+  const t = R.validatePostRequest({ ...base, platform: "trybe", brand: "  Mad   Rabbit ", product: "Hydro Flask" });
+  assert(t.ok);
+  assert.strictEqual(t.value.platform, "trybe");
+  assert.strictEqual(t.value.brand, "Mad Rabbit");
+  assert.strictEqual(t.value.product, null, "a Trybe post has no TikTok product");
+  assert(!R.validatePostRequest({ ...base, platform: "trybe" }).ok, "no brand, no post");
+  assert(!R.validatePostRequest({ ...base, platform: "trybe", brand: "<>" }).ok);
+  assert(!R.validatePostRequest({ ...base, platform: "instagram" }).ok);
+  assert.deepStrictEqual(R.PLATFORMS, ["tiktok", "trybe"]);
+});
+test("the Trybe window shows Trybe only (and its auth host); local only in a dev build", () => {
+  assert(TR.isTrybeUrl("https://jointrybe.com/creator"));
+  assert(TR.isTrybeUrl("https://www.jointrybe.com/auth/login"));
+  assert(TR.isTrybeUrl("https://sup.jointrybe.com/auth/v1/verify"));
+  assert(!TR.isTrybeUrl("http://jointrybe.com/"));
+  assert(!TR.isTrybeUrl("https://jointribe.com/"), "the parked look-alike domain");
+  assert(!TR.isTrybeUrl("https://jointrybe.com.evil.example/"));
+  assert(!TR.isTrybeUrl("https://www.tiktok.com/"));
+  assert(!TR.isTrybeUrl("http://127.0.0.1:5/creator"));
+  assert(TR.isTrybeUrl("http://127.0.0.1:5/creator", { allowLocal: true }));
+  const W = require(path.join(__dirname, "..", "src", "tiktok", "window.js"));
+  assert(W.KINDS.trybe.allowed("https://jointrybe.com/creator/brands/x", false));
+  assert(!W.KINDS.trybe.allowed("https://accounts.google.com/o/oauth2", false), "Trybe signs in with email and password: no providers");
+  assert(!W.KINDS.trybe.allowed("https://www.tiktok.com/tiktokstudio", false));
+  assert(!W.KINDS.tiktok.allowed("https://jointrybe.com/creator", false));
+  const parts = {};
+  const fake = { fromPartition: (p) => (parts[p] = parts[p] || { p }) };
+  assert(W.isTikTokSession(fake.fromPartition("persist:trybe"), fake), "main.js leaves the Trybe window to window.js");
+  assert(!W.isTikTokSession(fake.fromPartition("persist:app"), fake));
+});
+test("signed out = Trybe's sign-in pages; a brand page has an id", () => {
+  assert(TR.isTrybeLoginUrl("https://jointrybe.com/auth/login?redirect=%2Fcreator"));
+  assert(TR.isTrybeLoginUrl("https://jointrybe.com/auth/verify-email?email=x"));
+  assert(!TR.isTrybeLoginUrl("https://jointrybe.com/creator"));
+  assert.strictEqual(TR.brandIdOf("https://jointrybe.com/creator/brands/mad-rabbit-42?createContent=true"), "mad-rabbit-42");
+  assert.strictEqual(TR.brandIdOf("https://jointrybe.com/creator"), null);
+});
+test("Drew's walk: My brands → brand → Create content → Single submission → video → caption → Submit", () => {
+  assert.deepStrictEqual(TR.planTrybeSteps({ mode: "auto" }), ["trybe_open", "trybe_brand", "trybe_create", "trybe_single", "trybe_upload", "trybe_wait", "trybe_caption", "trybe_submit", "trybe_confirm"]);
+  const m = TR.planTrybeSteps({ mode: "manual" });
+  assert.strictEqual(m[m.length - 1], "handoff");
+  assert(!m.includes("trybe_submit"), "Manual never submits");
+  for (const s of TR.planTrybeSteps({ mode: "auto" }).concat("handoff")) assert(TR.TRYBE_STEP_WORDS[s], s);
+  assert(!TR.TRYBE_AI_STEPS.has("trybe_open") && !TR.TRYBE_AI_STEPS.has("handoff"));
+  for (const t of Object.values(TR.TRYBE_TARGETS)) assert(Array.isArray(t) && t.length > 0);
+  for (const t of Object.values(TR.TRYBE_TARGETS)) for (const w of t) if (w.text) new RegExp(w.text, "i");
+});
+test("the brand: the creator's words, never another brand", () => {
+  const rows = [{ ref: 0, text: "Rabbit Hole Coffee" }, { ref: 1, text: "Mad Rabbit Tattoo 12 submissions" }, { ref: 2, text: "Mad Rabbit" }, { ref: 3, text: "Sand Cloud" }];
+  assert.strictEqual(TR.pickBrand("Mad Rabbit", rows).ref, 2, "the closest title");
+  assert.strictEqual(TR.pickBrand("mad rabbit tattoo", rows).ref, 1);
+  assert.strictEqual(TR.pickBrand("Fuzzy Bear", rows), null);
+  assert.strictEqual(TR.pickBrand("Rabbit", [{ ref: 0, text: "Rabbit Hole Coffee" }]).ref, 0);
+  assert.strictEqual(TR.pickBrand("Mad Hatter", rows), null, "half the words is not the brand");
+  assert(TR.brandMatches("Mad Rabbit", "Mad Rabbit Tattoo · Create Content"));
+  assert.deepStrictEqual(TR.brandSearchTerms("Mad Rabbit"), ["Mad Rabbit", "Mad"]);
+  assert.strictEqual(TR.NOT_IN_BRANDS, "That brand isn't in your Trybe brands");
+});
+test("the saved login: Trybe's Supabase session in localStorage, with a refresh token", () => {
+  const session = (v) => ({ cookies: [], origins: [{ origin: "https://jointrybe.com", localStorage: [{ name: "theme", value: "dark" }, { name: "sb-sup-auth-token", value: JSON.stringify(v) }] }] });
+  const live = session({ access_token: "a", refresh_token: "r1", expires_at: 1, user: { id: "u", email: "drew@x.com" } });
+  assert(TR.hasTrybeSession(live), "an expired access token is fine: Trybe refreshes it");
+  assert.strictEqual(TR.trybeSessionOf(live).email, "drew@x.com");
+  assert(!TR.hasTrybeSession(session({ access_token: "a" })), "no refresh token");
+  assert(!TR.hasTrybeSession({ cookies: [], origins: [{ origin: "https://evil.example", localStorage: [{ name: "sb-sup-auth-token", value: JSON.stringify({ refresh_token: "r" }) }] }] }));
+  assert(!TR.hasTrybeSession(null));
+  assert(TR.hasTrybeSession({ origins: [{ origin: "http://127.0.0.1:9", localStorage: [{ name: "sb-sup-auth-token", value: JSON.stringify({ refresh_token: "r" }) }] }] }, "http://127.0.0.1:9/"));
+  const kept = TR.pickTrybeState(live);
+  assert.deepStrictEqual(kept.origins[0].localStorage.map((x) => x.name), ["sb-sup-auth-token"], "only the session key is kept");
+  assert.strictEqual(TR.pickTrybeState({ origins: [] }), null);
+});
+test("the submission id: an address, a link, or the words on the page", () => {
+  assert.strictEqual(TR.submissionIdFrom({ url: "https://jointrybe.com/creator/submissions/sub_8f2a91c" }), "sub_8f2a91c");
+  assert.strictEqual(TR.submissionIdFrom({ url: "https://jointrybe.com/creator", links: ["https://jointrybe.com/creator/submissions/1b2c3d4e-0000-4000-8000-000000000000"] }), "1b2c3d4e-0000-4000-8000-000000000000");
+  assert.strictEqual(TR.submissionIdFrom({ text: "Submission received! Submission ID: 8f2a91" }), "8f2a91");
+  assert.strictEqual(TR.submissionIdFrom({ url: "https://jointrybe.com/submissions/list" }), null);
+  assert.strictEqual(TR.submissionIdFrom({ text: "Thanks!" }), null);
+  assert.strictEqual(TR.trybeCaption("Healing in 3 days", ["tattoo"]), "Healing in 3 days #tattoo", "the string the platform lets the AI type");
+});
+
 Promise.all(pending.map((p) => p.catch((e) => { failures++; console.log(`  FAIL (async) ${e && e.message}`); }))).then(() => {
   console.log(failures ? `\n${failures} failed` : "\nall passed");
   process.exit(failures ? 1 : 0);

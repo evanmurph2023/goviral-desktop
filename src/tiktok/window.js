@@ -5,12 +5,16 @@
 //     once and stays logged in, kept apart from the app's own session and cookies.
 // The TikTok session gets no permissions (no camera, mic, notifications…), downloads nothing, and
 // shows only TikTok and TikTok's own log-in providers. Nothing of ours is injected into TikTok's page.
+// The Trybe window (2026-10-05) is the same window with its own session (`persist:trybe`): the
+// creator signs in to Trybe there once, and it shows only Trybe (trybe.js isTrybeUrl).
 "use strict";
 
 const path = require("path");
 const { isTikTokUrl, isLoginProviderUrl } = require("./rules");
+const { isTrybeUrl } = require("./trybe");
 
 const PARTITION = "persist:tiktok";
+const TRYBE_PARTITION = "persist:trybe";
 const BAR_PARTITION = "gvd-groot-bar";
 const BAR_H = 56;
 const BG = "#09090b";
@@ -28,29 +32,38 @@ function prepareSession(ses, { userAgent, log }) {
   ses.on("will-download", (_e, item) => { log("tiktok download refused", item.getFilename()); item.cancel(); });
 }
 
-const isTikTokSession = (ses, electronSession) => !!ses && (ses === electronSession.fromPartition(PARTITION) || ses === electronSession.fromPartition(BAR_PARTITION));
+// Each platform's window: its session, its title, the addresses it may show.
+const KINDS = {
+  tiktok: { partition: PARTITION, title: "Groot is posting to TikTok", allowed: (url, allowLocal) => isTikTokUrl(url, { allowLocal }) || isLoginProviderUrl(url) },
+  trybe: { partition: TRYBE_PARTITION, title: "Groot is posting to Trybe", allowed: (url, allowLocal) => isTrybeUrl(url, { allowLocal }) },
+};
 
-// Navigation inside the TikTok window: TikTok, or a log-in provider. Anything else is refused.
-function guardTikTokContents(contents, { allowLocal, log, popupOptions }) {
-  const ok = (url) => isTikTokUrl(url, { allowLocal }) || isLoginProviderUrl(url) || url === "about:blank";
+// A posting window's own session (TikTok's, Trybe's, or the bar's): main.js leaves these alone.
+const isTikTokSession = (ses, electronSession) => !!ses && [...Object.values(KINDS).map((k) => k.partition), BAR_PARTITION].some((p) => ses === electronSession.fromPartition(p));
+
+// Navigation inside a posting window: the platform (and, for TikTok, a log-in provider). Anything
+// else is refused.
+function guardTikTokContents(contents, { allowLocal, log, popupOptions, kind = "tiktok" }) {
+  const ok = (url) => KINDS[kind].allowed(url, allowLocal) || url === "about:blank";
   const guard = (details) => { if (!ok(details.url)) { log("tiktok navigation refused", details.url); details.preventDefault(); } };
   contents.on("will-navigate", (d) => { if (d.isMainFrame !== false) guard(d); });
   contents.on("will-redirect", (d) => { if (d.isMainFrame) guard(d); });
   contents.on("will-attach-webview", (e) => e.preventDefault());
   // TikTok's "log in with Google" opens a popup: allowed, in the same session, for those hosts only.
   contents.setWindowOpenHandler(({ url }) => (ok(url) && url !== "about:blank" ? { action: "allow", overrideBrowserWindowOptions: popupOptions() } : { action: "deny" }));
-  contents.on("did-create-window", (child) => guardTikTokContents(child.webContents, { allowLocal, log, popupOptions }));
+  contents.on("did-create-window", (child) => guardTikTokContents(child.webContents, { allowLocal, log, popupOptions, kind }));
 }
 
-function createTikTokWindow({ electron, allowLocal = false, show = true, log = () => {}, icon, userAgent }) {
+function createTikTokWindow({ electron, allowLocal = false, show = true, log = () => {}, icon, userAgent, kind = "tiktok" }) {
   const { BaseWindow, WebContentsView, ipcMain, session } = electron;
-  const ses = session.fromPartition(PARTITION);
+  const K = KINDS[kind] || KINDS.tiktok;
+  const ses = session.fromPartition(K.partition);
   prepareSession(ses, { userAgent, log });
 
-  const win = new BaseWindow({ width: 1280, height: 900, minWidth: 900, minHeight: 640, title: "Groot is posting to TikTok", backgroundColor: BG, show, icon, autoHideMenuBar: true });
+  const win = new BaseWindow({ width: 1280, height: 900, minWidth: 900, minHeight: 640, title: K.title, backgroundColor: BG, show, icon, autoHideMenuBar: true });
   const secure = (extra) => ({ contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, webviewTag: false, backgroundThrottling: false, ...extra });
   const bar = new WebContentsView({ webPreferences: secure({ partition: BAR_PARTITION, preload: path.join(__dirname, "bar-preload.js") }) });
-  const tiktok = new WebContentsView({ webPreferences: secure({ partition: PARTITION, spellcheck: false }) });
+  const tiktok = new WebContentsView({ webPreferences: secure({ partition: K.partition, spellcheck: false }) });
   bar.setBackgroundColor(BG);
   win.contentView.addChildView(tiktok);
   win.contentView.addChildView(bar);
@@ -63,8 +76,8 @@ function createTikTokWindow({ electron, allowLocal = false, show = true, log = (
   win.on("resize", layout);
   bar.webContents.loadFile(path.join(__dirname, "bar.html")).catch((e) => log("bar load failed", e));
   guardTikTokContents(tiktok.webContents, {
-    allowLocal, log,
-    popupOptions: () => ({ width: 520, height: 720, autoHideMenuBar: true, backgroundColor: BG, webPreferences: secure({ partition: PARTITION }) }),
+    allowLocal, log, kind: K === KINDS.trybe ? "trybe" : "tiktok",
+    popupOptions: () => ({ width: 520, height: 720, autoHideMenuBar: true, backgroundColor: BG, webPreferences: secure({ partition: K.partition }) }),
   });
   // A video that stopped half way (a product not in the showcase) leaves a half-filled upload page:
   // TikTok's "leave this page?" must not hold the next video back. Groot moves on; nothing was posted.
@@ -103,4 +116,4 @@ function createTikTokWindow({ electron, allowLocal = false, show = true, log = (
   };
 }
 
-module.exports = { createTikTokWindow, isTikTokSession, PARTITION, BAR_PARTITION };
+module.exports = { createTikTokWindow, isTikTokSession, PARTITION, TRYBE_PARTITION, BAR_PARTITION, KINDS };

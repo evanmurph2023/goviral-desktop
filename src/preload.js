@@ -1,5 +1,5 @@
 // What the page gets from the desktop shell: window.goviralDesktop = { version, platform } (and,
-// on the app's own pages, `tiktok`: Groot posts to TikTok, below),
+// on the app's own pages, `tiktok` and `trybe`: Groot posts to TikTok and sends to Trybe, below),
 // so the app can tell it is inside the downloaded app (e.g. hide its own "Install GoViral" card).
 // Sandboxed: no Node, no file system, nothing else crosses over.
 //
@@ -32,6 +32,15 @@ const tiktok = isApp ? Object.freeze({
     return () => ipcRenderer.removeListener("gvd:tiktok:progress", fn);
   },
 }) : undefined;
+// Groot posts to Trybe (src/tiktok/trybe-engine.js), the same bridge: post() is tiktok.post with
+// platform "trybe" (the request names the brand); open() shows the Trybe window, where the creator
+// signs in to Trybe themselves (Groot never sees the password).
+const trybe = isApp ? Object.freeze({
+  post: (req) => ipcRenderer.invoke("gvd:tiktok:post", { ...(req && typeof req === "object" ? req : {}), platform: "trybe" }),
+  stop: () => ipcRenderer.invoke("gvd:tiktok:stop"),
+  open: () => ipcRenderer.invoke("gvd:trybe:open"),
+  onProgress: tiktok.onProgress,
+}) : undefined;
 
 // The creator's finished videos (src/tiktok/files.js), also on the app's own pages only: folders
 // they pick with the system dialog, and files they drop on the window. The page gets names,
@@ -59,7 +68,7 @@ const drive = isApp ? Object.freeze({ connect: () => ipcRenderer.invoke("gvd:dri
 contextBridge.exposeInMainWorld("goviralDesktop", Object.freeze({
   version: arg("version"),
   platform: process.platform === "darwin" ? "mac" : process.platform === "win32" ? "windows" : process.platform,
-  ...(tiktok ? { tiktok } : {}),
+  ...(tiktok ? { tiktok, trybe, platforms: Object.freeze(["tiktok", "trybe"]) } : {}),
   ...(files ? { files } : {}),
   ...(drive ? { drive } : {}),
 }));

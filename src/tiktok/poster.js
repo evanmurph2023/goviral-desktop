@@ -4,6 +4,8 @@
 // own temp folder: the creator's files are never moved or deleted). One post at a time; the app
 // queues the rest. Used by the IPC bridge (index.js) and by the harness
 // (scripts/tiktok-harness.cjs), which points it at a local mock of TikTok Studio.
+// Trybe (2026-10-05): a job with platform "trybe" goes through the Trybe window (its own session,
+// persist:trybe, where the creator signed in) and the Trybe engine (trybe-engine.js).
 "use strict";
 
 const fs = require("fs");
@@ -14,6 +16,8 @@ const { pipeline } = require("stream/promises");
 const { createTikTokWindow } = require("./window");
 const { CdpPage } = require("./page");
 const { createEngine } = require("./engine");
+const { createTrybeEngine } = require("./trybe-engine");
+const { TRYBE_ORIGIN } = require("./trybe");
 const { STEP_WORDS, safeFileName, TIKTOK_UPLOAD_URL } = require("./rules");
 
 const MAX_BYTES = 4 * 1024 ** 3;
@@ -45,18 +49,22 @@ async function downloadTo(fetchImpl, url, dir, name, signal) {
   return file;
 }
 
-function createPoster({ electron, log = () => {}, groot, fetchVideo, files = null, drive = null, uploadUrl = TIKTOK_UPLOAD_URL, allowLocal = false, pace = 1, show = true, timeouts, icon, userAgent, tempRoot = path.join(os.tmpdir(), "goviral-groot") }) {
-  // TikTok Studio's upload page (a function in the harness, which switches mock pages)
+function createPoster({ electron, log = () => {}, groot, fetchVideo, files = null, drive = null, uploadUrl = TIKTOK_UPLOAD_URL, trybeUrl = TRYBE_ORIGIN, allowLocal = false, pace = 1, show = true, timeouts, icon, userAgent, tempRoot = path.join(os.tmpdir(), "goviral-groot") }) {
+  // TikTok Studio's upload page (a function in the harness, which switches mock pages); Trybe's site
   const target = () => (typeof uploadUrl === "function" ? uploadUrl() : uploadUrl);
-  let tw = null;          // the TikTok window, kept between posts of a run
+  const trybeBase = () => String(typeof trybeUrl === "function" ? trybeUrl() : trybeUrl).replace(/\/+$/, "");
+  const windows = {};     // "tiktok" | "trybe" → its window, kept between posts of a run
   let current = null;     // { abort, handedBack }
 
-  const ensureWindow = () => {
-    if (tw && !tw.isClosed()) return tw;
-    tw = createTikTokWindow({ electron, allowLocal, show, log, icon, userAgent });
-    tw.onStop(() => { if (current) current.abort.abort(); });
-    tw.onNext(() => { if (current) current.handedBack = true; });
-    return tw;
+  const kindOf = (job) => (job && job.platform === "trybe" ? "trybe" : "tiktok");
+  const ensureWindow = (kind = "tiktok") => {
+    const had = windows[kind];
+    if (had && !had.isClosed()) return had;
+    const w = createTikTokWindow({ electron, allowLocal, show, log, icon, userAgent, kind });
+    w.onStop(() => { if (current) current.abort.abort(); });
+    w.onNext(() => { if (current) current.handedBack = true; });
+    windows[kind] = w;
+    return w;
   };
 
   // The file TikTok gets: the creator's own (checked again by the registry), or a download.
@@ -80,8 +88,9 @@ function createPoster({ electron, log = () => {}, groot, fetchVideo, files = nul
     current = { abort, handedBack: false };
     const me = current;
     const dir = path.join(tempRoot, `${job.postId}-${Date.now()}`);
-    const w = ensureWindow();
-    const title = `Groot is posting "${job.name}"`;
+    const kind = kindOf(job);
+    const w = ensureWindow(kind);
+    const title = kind === "trybe" ? `Groot is sending "${job.name}" to ${job.brand} on Trybe` : `Groot is posting "${job.name}"`;
     const report = (p) => {
       const evt = { status: p.status || "posting", step: p.step || null, message: p.message || "", reason: p.reason || null, ai: !!p.ai, code: p.code || null };
       w.setStatus({ title, line: evt.message, status: evt.status });
@@ -94,7 +103,9 @@ function createPoster({ electron, log = () => {}, groot, fetchVideo, files = nul
       const filePath = await videoFile(job, dir, abort.signal);
       page = new CdpPage(w.contents, { pace, signal: abort.signal, log });
       page.attach();
-      const engine = createEngine({ page, groot, report, uploadUrl: target(), timeouts, log, handedBack: () => me.handedBack });
+      const engine = kind === "trybe"
+        ? createTrybeEngine({ page, groot, report, baseUrl: trybeBase(), timeouts, log, handedBack: () => me.handedBack })
+        : createEngine({ page, groot, report, uploadUrl: target(), timeouts, log, handedBack: () => me.handedBack });
       const r = await engine.run({ ...job, filePath });
       return r;
     } catch (e) {
@@ -114,15 +125,18 @@ function createPoster({ electron, log = () => {}, groot, fetchVideo, files = nul
     post,
     stop() { if (current) current.abort.abort(); },
     busy: () => !!current,
-    // Open the window on TikTok Studio so the creator can log in before the first post.
-    openWindow() {
-      const w = ensureWindow();
-      w.setStatus({ title: "TikTok", line: "Log in to TikTok here once. Groot uses this window to post.", status: "ready" });
-      if (!current) w.contents.loadURL(target()).catch(() => {});
+    // Open the window on TikTok Studio (or Trybe's creator portal) so the creator signs in there
+    // themselves before the first post. Groot never sees or types the password.
+    openWindow(kind = "tiktok") {
+      const k = kind === "trybe" ? "trybe" : "tiktok";
+      const w = ensureWindow(k);
+      if (k === "trybe") w.setStatus({ title: "Trybe", line: "Sign in to Trybe here once. Groot uses this window to submit your videos.", status: "ready" });
+      else w.setStatus({ title: "TikTok", line: "Log in to TikTok here once. Groot uses this window to post.", status: "ready" });
+      if (!current) w.contents.loadURL(k === "trybe" ? `${trybeBase()}/creator` : target()).catch(() => {});
       w.focus();
     },
-    window: () => tw,
-    close() { if (tw) tw.close(); tw = null; },
+    window: (kind = "tiktok") => windows[kind] || null,
+    close() { for (const k of Object.keys(windows)) { windows[k].close(); delete windows[k]; } },
   };
 }
 
