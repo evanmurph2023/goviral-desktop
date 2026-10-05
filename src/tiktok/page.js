@@ -6,7 +6,7 @@
 // is never enabled.
 "use strict";
 
-const { delay, chunks } = require("./rules");
+const { delay, chunks, TIMEOUTS } = require("./rules");
 
 const WORLD = "goviral-groot";
 const sleep = (ms, signal) => new Promise((res, rej) => {
@@ -132,7 +132,7 @@ const FOCUSED_IS_PASSWORD = function () {
 };
 
 class CdpPage {
-  constructor(webContents, { pace = 1, signal = null, log = () => {}, cdpMs = 15000 } = {}) {
+  constructor(webContents, { pace = 1, signal = null, log = () => {}, cdpMs = TIMEOUTS.cdp } = {}) {
     this.wc = webContents;
     this.cdpMs = cdpMs; // one page script may take this long; then it counts as "not found" (never a hang)
     this.dbg = webContents.debugger;
