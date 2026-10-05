@@ -151,11 +151,34 @@ function stem(w) {
 function productWords(text) {
   return String(text || "").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").split(/[^\p{L}\p{N}]+/u).filter((w) => w && !FILLER.has(w)).map(stem);
 }
+// Two words are the same word when they're equal, or a letter or two apart (TikTok titles are
+// often misspelled: Drew's showcase lists "Comfrt Weekend Slipper", 2026-10-05). Short words must
+// match exactly so "cap" never matches "car".
+function editDistance(a, b) {
+  if (Math.abs(a.length - b.length) > 2) return 3;
+  const prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = tmp;
+    }
+  }
+  return prev[b.length];
+}
+function sameWord(a, b) {
+  if (a === b) return true;
+  const n = Math.min(a.length, b.length);
+  if (n < 4) return false;
+  return editDistance(a, b) <= (n >= 8 ? 2 : 1);
+}
 function productScore(want, have) {
   const w = [...new Set(productWords(want))];
   if (!w.length) return 0;
-  const h = new Set(productWords(have));
-  return w.filter((x) => h.has(x)).length / w.length;
+  const h = [...new Set(productWords(have))];
+  return w.filter((x) => h.some((y) => sameWord(x, y))).length / w.length;
 }
 const PICK_AT = 0.75;
 function pickProduct(want, rows) {
@@ -168,14 +191,24 @@ function pickProduct(want, rows) {
   }
   return best;
 }
-// What to type into the showcase search: the product as the creator said it, then (TikTok's
-// search wants every word as typed, so "slippers" misses "Slipper") the first word alone.
+// What to type into the showcase search, in order, until a row matches: the product as the
+// creator said it; then each word alone, the last one first (usually what the thing IS: "slipper"),
+// in the singular too (TikTok's search wants every word as typed, so "slippers" misses "Slipper");
+// then nothing at all, which lists the whole showcase to check by eye. One term used to be tried
+// and a showcase titled "Comfrt Weekend Slipper" was never found (2026-10-05).
+const SHOWCASE_ALL = "";
 function searchTerms(product) {
   const full = str(product, 80);
-  const words = full.split(/\s+/).filter((w) => w.length > 1 && !FILLER.has(w.toLowerCase()));
+  const words = full.split(/\s+/).filter((w) => w.length > 2 && !FILLER.has(w.toLowerCase()));
   const out = [full];
-  if (words.length > 1) out.push(words[0]);
-  return out.filter((t, i) => t && out.indexOf(t) === i);
+  for (const w of [...words].reverse()) {
+    out.push(w);
+    const s = stem(w.toLowerCase());
+    if (s !== w.toLowerCase()) out.push(s);
+  }
+  const seen = new Set();
+  const terms = out.filter((t) => { const k = t.toLowerCase(); if (!t || seen.has(k)) return false; seen.add(k); return true; }).slice(0, 6);
+  return [...terms, SHOWCASE_ALL];
 }
 
 // The product link name: Groot never renames it. Only when TikTok says it has characters it

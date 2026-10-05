@@ -299,8 +299,8 @@ test("showcase search, 0 results: that video stops at once with what was searche
   assert.strictEqual(r.status, "failed");
   assert.strictEqual(r.code, "product_not_found");
   assert(r.error.startsWith(R.NOT_IN_SHOWCASE), r.error);
-  assert(/"Fuzzy Bear Earmuffs" or "Fuzzy"/.test(r.error), r.error);
-  assert.deepStrictEqual(S.searches, ["Fuzzy Bear Earmuffs", "Fuzzy"]);
+  assert(/Groot searched "Fuzzy Bear Earmuffs", "Earmuffs", "earmuff", "Bear", "Fuzzy" and the whole showcase. Add it to your showcase in TikTok, then tap Try again./.test(r.error), r.error);
+  assert.deepStrictEqual(S.searches, ["Fuzzy Bear Earmuffs", "Earmuffs", "earmuff", "Bear", "Fuzzy", ""]);
   assert.strictEqual(groot.calls.length, 0);
   assert.strictEqual(S.product, null);
 });
@@ -316,7 +316,7 @@ test("showcase search, many results: the best match (not Cloud Comfort Slides)",
   const { r, S } = await run({}, { job: { product: "Comfort slippers" } });
   assert.strictEqual(r.status, "posted");
   assert.strictEqual(S.product, "Comfort Weekend Slipper");
-  assert.deepStrictEqual(S.searches, ["Comfort slippers", "Comfort"], "the full name, then the first word");
+  assert.deepStrictEqual(S.searches.slice(0, 2), ["Comfort slippers", "slippers"], "the full name, then the product word");
   assert(/picked "Comfort Weekend Slipper" \(score 1\.00/.test(r.steps.find((s) => s.step === "product_pick").how));
 });
 

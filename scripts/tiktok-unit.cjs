@@ -157,10 +157,16 @@ test("pickProduct: the best row, the shorter title on a tie, nothing below 3 in 
   assert.strictEqual(R.pickProduct("Comfort slippers navy suede", rows), null, "2 of 4 is not");
   assert.strictEqual(R.pickProduct("x", []), null);
 });
-test("searchTerms: as said, then the first word", () => {
-  assert.deepStrictEqual(R.searchTerms("Comfort slippers"), ["Comfort slippers", "Comfort"]);
-  assert.deepStrictEqual(R.searchTerms("The Comfort slippers"), ["The Comfort slippers", "Comfort"]);
-  assert.deepStrictEqual(R.searchTerms("Stanley"), ["Stanley"]);
+test("searchTerms: as said, then each word (the last first, singular too), then the whole showcase", () => {
+  assert.deepStrictEqual(R.searchTerms("Comfort slippers"), ["Comfort slippers", "slippers", "slipper", "Comfort", ""]);
+  assert.deepStrictEqual(R.searchTerms("The Comfort slippers"), ["The Comfort slippers", "slippers", "slipper", "Comfort", ""]);
+  assert.deepStrictEqual(R.searchTerms("Stanley"), ["Stanley", ""]);
+});
+test("productScore: a letter or two off is the same word; short words must match exactly", () => {
+  assert.strictEqual(R.productScore("comfort weekend slipper", "Comfrt Weekend Slipper"), 1); // Drew's showcase, 2026-10-05
+  assert.strictEqual(R.productScore("cap", "car"), 0);
+  assert.ok(R.pickProduct("comfort weekend slippers", [{ text: "Cozy Slipper", ref: "a" }, { text: "Comfrt Weekend Slipper", ref: "b" }]).ref === "b");
+  assert.strictEqual(R.pickProduct("rosemary oil", [{ text: "Comfrt Weekend Slipper", ref: "b" }]), null);
 });
 test("cleanProductName: only what TikTok refuses comes out", () => {
   assert.strictEqual(R.cleanProductName("Glow Serum ✨ Vitamin C ★ 30ml"), "Glow Serum Vitamin C 30ml");

@@ -394,15 +394,19 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
           return;
         }
         // nothing on screen at all and no "no products" either: the list moved, not the product
-        if (!rows.length && !(await noResults())) throw new StepMissed("no product rows and no 'no products' notice");
+        if (!rows.length && term && !(await noResults())) throw new StepMissed("no product rows and no 'no products' notice");
       }
-      const list = showcaseList(seen);
-      if (!list) throw new Failed(`${NOT_IN_SHOWCASE}. TikTok found nothing for ${terms.map((t) => `"${t}"`).join(" or ")}.`, "product_not_found");
+      const typed = terms.filter(Boolean).map((t) => `"${t}"`).join(", ");
+      // Only rows that share a word with the product are worth asking about; a showcase with
+      // nothing like it means the product isn't there, said at once.
+      const list = showcaseList(seen.filter((r) => productScore(job.product, r.text) > 0));
+      const addIt = "Add it to your showcase in TikTok, then tap Try again.";
+      if (!list) throw new Failed(`${NOT_IN_SHOWCASE}. Groot searched ${typed} and the whole showcase. ${addIt}`, "product_not_found");
       // TikTok showed products, none clearly the creator's: their call, never Groot's guess.
-      await needsYou("product_pick", `TikTok's showcase shows ${list}, and none is clearly "${job.product}". Select the right one in the TikTok window, or press Stop.`, {
+      await needsYou("product_pick", `Groot searched ${typed} and the whole showcase. It shows ${list}, and none is clearly "${job.product}". Select the right one in the TikTok window, or press Stop.`, {
         check: CREATOR_CHECK.product_pick,
         code: "product_not_found",
-        fail: `${NOT_IN_SHOWCASE}. TikTok showed ${list}.`,
+        fail: `${NOT_IN_SHOWCASE}. TikTok showed ${list}. ${addIt}`,
       });
     },
     async product_next() {
