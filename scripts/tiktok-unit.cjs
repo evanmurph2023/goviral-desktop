@@ -319,6 +319,146 @@ test("the submission id: an address, a link, or the words on the page", () => {
   assert.strictEqual(TR.trybeCaption("Healing in 3 days", ["tattoo"]), "Healing in 3 days #tattoo", "the string the platform lets the AI type");
 });
 
+// ---- Groot reads the accounts (src/tiktok/reads.js, accounts.js) ----------------------------------------
+console.log("reads");
+const RD = require(path.join(__dirname, "..", "src", "tiktok", "reads.js"));
+test("a read request: three reads, limits capped, a brand by id or by name", () => {
+  assert.deepStrictEqual(RD.validateReadRequest({ read: "trybe_brands" }).value, { read: "trybe_brands", platform: "trybe", params: { limit: 50 } });
+  assert.strictEqual(RD.validateReadRequest({ read: "trybe_brands", params: { limit: 5000 } }).value.params.limit, 100);
+  assert.strictEqual(RD.validateReadRequest({ read: "tiktok_recent_posts", params: '{"limit":7}' }).value.params.limit, 7, "params as the JSON column's text");
+  assert.strictEqual(RD.validateReadRequest({ read: "tiktok_recent_posts" }).value.platform, "tiktok");
+  assert.deepStrictEqual(RD.validateReadRequest({ read: "trybe_brand", params: { brandId: "mad-rabbit" } }).value.params, { limit: 1, brandId: "mad-rabbit" });
+  assert.deepStrictEqual(RD.validateReadRequest({ read: "trybe_brand", params: { brand: "Mad <b>Rabbit" } }).value.params, { limit: 1, brand: "Mad bRabbit" });
+  assert(!RD.validateReadRequest({ read: "trybe_brand", params: {} }).ok, "which brand?");
+  assert(!RD.validateReadRequest({ read: "trybe_brand", params: { brandId: "../../admin" } }).ok);
+  assert(!RD.validateReadRequest({ read: "trybe_everything" }).ok);
+  assert(!RD.validateReadRequest({ read: "__proto__" }).ok);
+  assert(!RD.validateReadRequest(null).ok);
+});
+test("reading never presses what changes the account (scripted presses and the AI's alike)", () => {
+  for (const ok of ["View all", "View All", "Load more", "Show more", "Read more", "Next page", "›", "2", "Brief", "Requirements", "Products", "Examples", "Do's & Don'ts", "Campaign info ▸", "Posts", "Payouts", "Submissions"]) assert(RD.isSafeToPress(ok), ok);
+  for (const no of ["Join campaign", "Apply", "Apply now", "Submit", "Create Content", "+ Create content", "Delete", "Edit", "Save", "Accept", "I agree", "Follow", "Sign out", "Log out", "Upload", "Post", "Publish", "Withdraw", "Pay now", "Confirm", "Request product", "Claim", "Cancel", "Send", ""]) assert(!RD.isSafeToPress(no), no);
+  assert(RD.isSafeToPress("Post Malone Merch", ["Post Malone Merch"]), "the brand's own name");
+  assert(!RD.isSafeToPress("Apply to Post Malone Merch", ["Post Malone Merch"]), "but not a verb next to it");
+  const view = { width: 1000, height: 800, elements: [{ ref: 0, role: "button", name: "Join campaign" }, { ref: 1, role: "tab", name: "Brief" }, { ref: 2, role: "checkbox", name: "Show more" }, { ref: 3, role: "textbox", name: "Search brands" }, { ref: 4, role: "button", name: "" }] };
+  const vals = ["Mad Rabbit"];
+  assert.strictEqual(RD.validateReadAction({ action: "click", ref: 1 }, view, vals).action, "click");
+  assert.strictEqual(RD.validateReadAction({ action: "click", ref: 0 }, view, vals).action, "need_user", "Join");
+  assert.strictEqual(RD.validateReadAction({ action: "click", ref: 2 }, view, vals).action, "need_user", "a checkbox");
+  assert.strictEqual(RD.validateReadAction({ action: "click", ref: 4 }, view, vals).action, "need_user", "nothing named");
+  assert.strictEqual(RD.validateReadAction({ action: "click", x: 10, y: 10 }, view, vals).action, "need_user", "never a coordinate");
+  assert.strictEqual(RD.validateReadAction({ action: "press", key: "Enter" }, view, vals).action, "need_user", "Enter can submit");
+  assert.strictEqual(RD.validateReadAction({ action: "press", key: "Escape" }, view, vals).action, "press");
+  assert.strictEqual(RD.validateReadAction({ action: "type", ref: 3, text: "Mad Rabbit" }, view, vals).action, "type");
+  assert.strictEqual(RD.validateReadAction({ action: "type", ref: 3, text: "hello" }, view, vals).action, "need_user");
+  assert.strictEqual(RD.validateReadAction({ action: "scroll", dy: 400 }, view, vals).action, "scroll");
+});
+test("everything read is HTML stripped and capped; addresses are http(s) only", () => {
+  assert.strictEqual(RD.cleanText("<b>Film</b> in &amp; <script>alert(1)</script>natural&nbsp;light &lt;i&gt;x&lt;/i&gt;"), "Film in & natural light x");
+  assert.strictEqual(RD.cleanText("a\u0000b​c"), "abc");
+  assert.strictEqual(RD.cleanText("x".repeat(50), 10).length, 10);
+  assert.strictEqual(RD.cleanText("one\n\n  two  ", 100, { lines: true }), "one\ntwo");
+  assert.strictEqual(RD.safeUrl("javascript:alert(1)"), null);
+  assert.strictEqual(RD.safeUrl("https://u:p@x.com/"), null);
+  assert.strictEqual(RD.safeUrl("", "https://jointrybe.com/"), null);
+  assert.strictEqual(RD.safeUrl("/creator/brands/a", "https://jointrybe.com/x"), "https://jointrybe.com/creator/brands/a");
+});
+test("the brand list: one per brand, its logo and words; Create content links aren't brands", () => {
+  const base = "https://jointrybe.com";
+  const cards = [
+    { href: `${base}/creator/brands/mad-rabbit`, name: "Mad Rabbit", lines: ["Mad Rabbit", "Tattoo aftercare", "2 submissions"], img: `${base}/logo.png` },
+    { href: `${base}/creator/brands/mad-rabbit?createContent=true`, name: "Create Content", lines: [] },
+    { href: `${base}/creator/brands/mad-rabbit`, name: "Mad Rabbit", lines: [] },
+    { href: `${base}/creator/brands/comfort-co`, name: "", lines: ["Comfort Co"], img: "data:image/png;base64,xx" },
+    { href: "https://evil.example/creator/brands/x", name: "<img src=x onerror=alert(1)>Evil", lines: [] },
+  ];
+  const out = RD.brandsFromCards(cards, { base });
+  assert.deepStrictEqual(out.slice(0, 2), [{ id: "mad-rabbit", name: "Mad Rabbit", logoUrl: `${base}/logo.png`, summary: "Tattoo aftercare · 2 submissions" }, { id: "comfort-co", name: "Comfort Co" }]);
+  assert.ok(!JSON.stringify(out).includes("<img"), "stripped");
+  assert.strictEqual(RD.brandsFromCards(cards, { base, limit: 1 }).length, 1);
+});
+test("a brand's page as text: sections by their words, Do's & Don'ts marks, a payout label, product cards; a bare page is partial", () => {
+  const base = "https://jointrybe.com";
+  const dump = { url: `${base}/creator/brands/mr`, blocks: [
+    { t: "h", level: 1, text: "Mad Rabbit" }, { t: "p", text: "Tattoo aftercare" },
+    { t: "p", text: "Payout: $50 per approved video" },
+    { t: "h", level: 2, text: "About the campaign" }, { t: "p", text: "Show the gel calming a fresh tattoo." },
+    { t: "h", level: 3, text: "Do's & Don'ts" }, { t: "li", text: "✅ Show the product early" }, { t: "li", text: "❌ Mention competitors" }, { t: "li", text: "Avoid: loud music" },
+    { t: "b", level: 6, text: "What we need" }, { t: "li", text: "One 9:16 video, 30-60s" },
+    { t: "h", level: 2, text: "Products" }, { t: "h", level: 3, text: "Soothing Gel", href: "https://madrabbit.example/gel" }, { t: "p", text: "$24.99" }, { t: "b", level: 6, text: "Tattoo Balm" },
+    { t: "h", level: 2, text: "Inspiration" }, { t: "p", text: "Morning routine", href: "https://www.tiktok.com/@mr/video/7311111111111111111" },
+    { t: "h", level: 2, text: "Your submissions" }, { t: "li", text: "Old take 1" },
+  ] };
+  const b = RD.brandFromBlocks(dump, { id: "mr", base });
+  assert.strictEqual(b.name, "Mad Rabbit");
+  assert.strictEqual(b.payout, "$50 per approved video");
+  assert.match(b.brief, /calming a fresh tattoo/);
+  assert.deepStrictEqual(b.dos, ["Show the product early"]);
+  assert.deepStrictEqual(b.donts, ["Mention competitors", "loud music"]);
+  assert.deepStrictEqual(b.deliverables, ["One 9:16 video, 30-60s"]);
+  assert.deepStrictEqual(b.products, [{ name: "Soothing Gel", url: "https://madrabbit.example/gel" }, { name: "Tattoo Balm" }]);
+  assert.deepStrictEqual(b.examples, [{ title: "Morning routine", url: "https://www.tiktok.com/@mr/video/7311111111111111111" }]);
+  assert.ok(!b.brief.includes("Old take"), "the creator's own submissions aren't the brand's");
+  assert.strictEqual(b.partial, false);
+  const bare = RD.brandFromBlocks({ blocks: [{ t: "h", level: 1, text: "Comfort Co" }] }, { id: "c" });
+  assert.strictEqual(bare.partial, true);
+  assert.deepStrictEqual(bare.missing, ["brief", "requirements", "products", "payout", "examples"]);
+  assert(RD.brandIsEmpty(bare));
+  assert.strictEqual(RD.brandFromBlocks(null, { id: "x", name: "X" }).name, "X", "no page at all: no crash");
+});
+test("TikTok Studio's posts: dates, counts, captions", () => {
+  const now = Date.UTC(2026, 9, 5, 12, 0);
+  assert.strictEqual(RD.parseStudioDate("Oct 3, 4:12 PM", now), "2026-10-03T16:12:00.000Z");
+  assert.strictEqual(RD.parseStudioDate("Dec 30, 2025", now), "2025-12-30T00:00:00.000Z");
+  assert.strictEqual(RD.parseStudioDate("Dec 30", now), "2025-12-30T00:00:00.000Z", "no year, in the future: last year");
+  assert.strictEqual(RD.parseStudioDate("2026-09-28", now), "2026-09-28T00:00:00.000Z");
+  assert.strictEqual(RD.parseStudioDate("10-03", now), "2026-10-03T00:00:00.000Z");
+  assert.strictEqual(RD.parseStudioDate("2h ago", now), "2026-10-05T10:00:00.000Z");
+  assert.strictEqual(RD.parseStudioDate("Yesterday", now), "2026-10-04T00:00:00.000Z");
+  assert.strictEqual(RD.parseStudioDate("Posted on 3 Oct 2026", now), "2026-10-03T00:00:00.000Z");
+  assert.strictEqual(RD.parseStudioDate("2026-10-03T16:12:00Z", now), "2026-10-03T16:12:00.000Z");
+  assert.strictEqual(RD.parseStudioDate("Oct 5 haul try-on", now, { strict: true }), null, "a caption is not a date");
+  assert.strictEqual(RD.parseStudioDate("hello", now), null);
+  for (const [t, n] of [["1.2K", 1200], ["▶ 15.3K", 15300], ["2M", 2000000], ["1,204", 1204], ["980 views", 980], ["x", null]]) assert.strictEqual(RD.parseCount(t), n, t);
+  const rows = [
+    { href: "https://www.tiktok.com/@drew/video/7400000000000000001", linkText: "", caption: "", lines: ["healed in 3 days #tattoo", "Oct 3, 4:12 PM · Everyone", "▶ 1.2K", "♥ 48", "Edit", "Delete"], views: "▶ 1.2K" },
+    { href: "https://www.tiktok.com/@drew/video/7400000000000000001", lines: [] },
+    { href: "https://evil.example/@x/video/7400000000000000002", lines: ["nope"] },
+    { href: "https://www.tiktok.com/@drew/video/7400000000000000003", linkText: "Oct 5 haul", lines: ["Oct 5 haul", "2h ago", "15"] },
+  ];
+  assert.deepStrictEqual(RD.postsFromRows(rows, { now }), [
+    { url: "https://www.tiktok.com/@drew/video/7400000000000000001", caption: "healed in 3 days #tattoo", postedAt: "2026-10-03T16:12:00.000Z", views: 1200 },
+    { url: "https://www.tiktok.com/@drew/video/7400000000000000003", caption: "Oct 5 haul", postedAt: "2026-10-05T10:00:00.000Z", views: 15 },
+  ]);
+});
+test("a result stays under the size cap", () => {
+  const big = { id: "x", name: "X", brief: "b".repeat(4000), text: "t".repeat(8000), requirements: Array(80).fill("r".repeat(300)), dos: [], donts: [], deliverables: Array(40).fill("d".repeat(300)), products: Array(30).fill({ name: "p".repeat(120), url: `https://x.com/${"u".repeat(400)}` }), examples: Array(20).fill({ title: "e".repeat(300), url: `https://x.com/${"v".repeat(400)}` }) };
+  assert(JSON.stringify(RD.capReadResult("trybe_brand", big)).length <= RD.MAX_RESULT_BYTES);
+  const list = Array(2000).fill({ id: "a".repeat(80), name: "n".repeat(120), summary: "s".repeat(300) });
+  const capped = RD.capReadResult("trybe_brands", list);
+  assert(JSON.stringify(capped).length <= RD.MAX_RESULT_BYTES && capped.length > 50);
+});
+const AC = require(path.join(__dirname, "..", "src", "tiktok", "accounts.js"));
+test("Trybe signed in or not, from the Trybe window's Local Storage files (never a window)", () => {
+  const rec = (tag, name, value, utf16 = false) => {
+    const key = Buffer.from(`_https://jointrybe.com\x00\x01${name}`, "latin1");
+    const parts = [Buffer.from([tag, key.length]), key];
+    if (tag === 1) {
+      const v = Buffer.concat([Buffer.from([utf16 ? 0 : 1]), Buffer.from(value, utf16 ? "utf16le" : "latin1")]);
+      const len = v.length < 128 ? Buffer.from([v.length]) : Buffer.from([(v.length & 0x7f) | 0x80, v.length >> 7]);
+      parts.push(len, v);
+    }
+    return Buffer.concat([Buffer.alloc(12, 7), ...parts]);
+  };
+  const session = JSON.stringify({ access_token: "a".repeat(150), refresh_token: "r1", expires_at: 1, user: { email: "Drew@X.com" } });
+  assert.deepStrictEqual(AC.trybeSessionFromStorage([rec(1, "sb-sup-auth-token", session)]), { signedIn: true, handle: "drew@x.com" });
+  assert.deepStrictEqual(AC.trybeSessionFromStorage([rec(1, "sb-sup-auth-token", session, true)]), { signedIn: true, handle: "drew@x.com" }, "UTF-16");
+  assert.deepStrictEqual(AC.trybeSessionFromStorage([rec(1, "sb-sup-auth-token", session), rec(0, "sb-sup-auth-token")]), { signedIn: false }, "signed out later");
+  assert.deepStrictEqual(AC.trybeSessionFromStorage([rec(1, "sb-sup-auth-token", JSON.stringify({ access_token: "a" }))]), { signedIn: false });
+  assert.strictEqual(AC.trybeSessionFromStorage([rec(1, "theme", "dark")]), null, "nothing known");
+  assert.strictEqual(AC.trybeSessionFromStorage([Buffer.from(`_https://evil.example\x00\x01sb-sup-auth-token`, "latin1")]), null);
+});
+
 Promise.all(pending.map((p) => p.catch((e) => { failures++; console.log(`  FAIL (async) ${e && e.message}`); }))).then(() => {
   console.log(failures ? `\n${failures} failed` : "\nall passed");
   process.exit(failures ? 1 : 0);

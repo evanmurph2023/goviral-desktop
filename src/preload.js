@@ -1,5 +1,6 @@
 // What the page gets from the desktop shell: window.goviralDesktop = { version, platform } (and,
-// on the app's own pages, `tiktok` and `trybe`: Groot posts to TikTok and sends to Trybe, below),
+// on the app's own pages, `tiktok` and `trybe`: Groot posts to TikTok and sends to Trybe, and `reads`:
+// Groot reads them, below),
 // so the app can tell it is inside the downloaded app (e.g. hide its own "Install GoViral" card).
 // Sandboxed: no Node, no file system, nothing else crosses over.
 //
@@ -26,6 +27,8 @@ const tiktok = isApp ? Object.freeze({
   post: (req) => ipcRenderer.invoke("gvd:tiktok:post", req),
   stop: () => ipcRenderer.invoke("gvd:tiktok:stop"),
   open: () => ipcRenderer.invoke("gvd:tiktok:open"),
+  // { signedIn, handle? } from the TikTok window's own session; never opens the window
+  status: () => ipcRenderer.invoke("gvd:tiktok:status"),
   onProgress: (cb) => {
     const fn = (_e, p) => { try { cb(p); } catch { /* the page's own problem */ } };
     ipcRenderer.on("gvd:tiktok:progress", fn);
@@ -39,7 +42,21 @@ const trybe = isApp ? Object.freeze({
   post: (req) => ipcRenderer.invoke("gvd:tiktok:post", { ...(req && typeof req === "object" ? req : {}), platform: "trybe" }),
   stop: () => ipcRenderer.invoke("gvd:tiktok:stop"),
   open: () => ipcRenderer.invoke("gvd:trybe:open"),
+  // { signedIn, handle? } (the handle is the Trybe login's email); never opens the window
+  status: () => ipcRenderer.invoke("gvd:trybe:status"),
   onProgress: tiktok.onProgress,
+}) : undefined;
+// Groot READS the creator's accounts (src/tiktok/read-engine.js), navigation and reading only, in
+// their own TikTok / Trybe windows, one at a time with posting:
+//   run({ read: "trybe_brands" | "trybe_brand" | "tiktok_recent_posts", params: { brandId?, brand?, limit? } })
+//     → { ok, read, status: done | failed | stopped, result, partial, error, code }
+//   brands() → the last "My brands" read (kept on disk): { at, brands: [{ id, name, logoUrl?, summary? }] } | null
+const reads = isApp ? Object.freeze({
+  run: (req) => ipcRenderer.invoke("gvd:reads:run", req),
+  brands: () => ipcRenderer.invoke("gvd:reads:brands"),
+  stop: () => ipcRenderer.invoke("gvd:tiktok:stop"),
+  onProgress: tiktok.onProgress,
+  list: Object.freeze(["trybe_brands", "trybe_brand", "tiktok_recent_posts"]),
 }) : undefined;
 
 // The creator's finished videos (src/tiktok/files.js), also on the app's own pages only: folders
@@ -68,7 +85,7 @@ const drive = isApp ? Object.freeze({ connect: () => ipcRenderer.invoke("gvd:dri
 contextBridge.exposeInMainWorld("goviralDesktop", Object.freeze({
   version: arg("version"),
   platform: process.platform === "darwin" ? "mac" : process.platform === "win32" ? "windows" : process.platform,
-  ...(tiktok ? { tiktok, trybe, platforms: Object.freeze(["tiktok", "trybe"]) } : {}),
+  ...(tiktok ? { tiktok, trybe, reads, platforms: Object.freeze(["tiktok", "trybe"]) } : {}),
   ...(files ? { files } : {}),
   ...(drive ? { drive } : {}),
 }));

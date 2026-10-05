@@ -17,7 +17,7 @@ const ok = (name) => console.log(`  ok   ${name}`);
 const bad = (name, e) => { failures++; console.log(`  FAIL ${name}\n       ${e && e.message ? e.message : e}`); };
 const test = (name, fn) => { try { fn(); ok(name); } catch (e) { bad(name, e); } };
 
-const SOURCES = ["src/main.js", "src/preload.js", "src/links.js", "src/tiktok/index.js", "src/tiktok/poster.js", "src/tiktok/engine.js", "src/tiktok/page.js", "src/tiktok/window.js", "src/tiktok/rules.js", "src/tiktok/trybe.js", "src/tiktok/trybe-engine.js", "src/tiktok/files.js", "src/tiktok/drive.js", "src/tiktok/bar-preload.js", "electron-builder.config.js", "scripts/make-icons.cjs", "scripts/tiktok-unit.cjs", "scripts/tiktok-harness.cjs"];
+const SOURCES = ["src/main.js", "src/preload.js", "src/links.js", "src/tiktok/index.js", "src/tiktok/poster.js", "src/tiktok/engine.js", "src/tiktok/page.js", "src/tiktok/window.js", "src/tiktok/rules.js", "src/tiktok/trybe.js", "src/tiktok/trybe-engine.js", "src/tiktok/reads.js", "src/tiktok/read-engine.js", "src/tiktok/accounts.js", "src/tiktok/files.js", "src/tiktok/drive.js", "src/tiktok/bar-preload.js", "electron-builder.config.js", "scripts/make-icons.cjs", "scripts/tiktok-unit.cjs", "scripts/tiktok-harness.cjs"];
 
 console.log("1. parse");
 for (const f of SOURCES) {

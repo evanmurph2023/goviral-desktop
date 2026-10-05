@@ -10,6 +10,15 @@
 //   gvd:tiktok:stop   → stops the post running now
 //   gvd:tiktok:open   → shows the TikTok window (to log in once, ahead of the first post)
 //   gvd:trybe:open    → shows the Trybe window (the creator signs in to Trybe there, once)
+//   gvd:tiktok:status → { signedIn, handle? }  TikTok's session cookie in the TikTok window's session
+//   gvd:trybe:status  → { signedIn, handle? }  Trybe's session in the Trybe window's storage
+//                       (accounts.js; neither ever opens a window to check)
+//
+// Groot READS the creator's accounts (reads.js, read-engine.js; navigation and reading only):
+//   gvd:reads:run     { read: "trybe_brands" | "trybe_brand" | "tiktok_recent_posts", params: { brandId?, brand?, limit? }, readId? }
+//                     → { ok, read, status: done | failed | stopped, result, partial, error?, code?, aiSteps }
+//                     progress on "gvd:tiktok:progress" with read set; one at a time with posts
+//   gvd:reads:brands  → the last "My brands" read, kept on disk: { at, brands } | null
 //
 // The creator's finished videos (src/tiktok/files.js): only folders they picked, only files they dropped.
 //   gvd:files:roots                       → [{ id, name, path, remembered, missing }]
@@ -28,7 +37,9 @@ const path = require("path");
 const { createPoster, makeGrootClient } = require("./poster");
 const { createFileRegistry } = require("./files");
 const { createDriveClient } = require("./drive");
+const { createAccounts } = require("./accounts");
 const { isAllowedCaller, validatePostRequest, TIKTOK_UPLOAD_URL } = require("./rules");
+const { validateReadRequest } = require("./reads");
 const { TRYBE_ORIGIN } = require("./trybe");
 
 const isId = (v, re) => typeof v === "string" && re.test(v);
@@ -95,6 +106,23 @@ function setUpTikTok({ electron, appOrigin, log, icon, overrides = {} }) {
   handle("gvd:tiktok:open", () => { poster.openWindow("tiktok"); return true; }, false);
   handle("gvd:trybe:open", () => { poster.openWindow("trybe"); return true; }, false);
 
+  // ---- the accounts (never a window just to check) and Groot's reads ----
+  const accounts = createAccounts({ electron, userData: o.userData || app.getPath("userData"), windowOf: (k) => poster.window(k), trybeOrigin: (dev && o.trybeUrl) || trybeUrl, log });
+  handle("gvd:tiktok:status", () => accounts.tiktokStatus(), { signedIn: false });
+  handle("gvd:trybe:status", () => accounts.trybeStatus(), { signedIn: false });
+  handle("gvd:reads:run", async (e, _o, raw) => {
+    const v = validateReadRequest(raw);
+    if (!v.ok) return { ok: false, status: "failed", error: v.error, code: "bad_read" };
+    if (poster.busy()) return { ok: false, status: "failed", error: "Groot is busy in a window right now. One at a time.", code: "busy" };
+    const req = v.value;
+    log("read start", req.read);
+    const r = await poster.read(req, (p) => { if (!e.sender.isDestroyed()) e.sender.send("gvd:tiktok:progress", { readId: req.readId || null, ...p }); });
+    log("read end", req.read, r.status, r.code || "");
+    if (r.status === "done") accounts.remember(req.read, r.result);
+    return { ok: r.status === "done", read: req.read, status: r.status, result: r.status === "done" ? r.result : null, partial: !!r.partial, error: r.error || null, code: r.code || null, aiSteps: r.aiSteps || 0 };
+  }, { ok: false, status: "failed", error: "Not allowed." });
+  handle("gvd:reads:brands", () => accounts.lastBrands(), null);
+
   // ---- the creator's folders and files ----
   handle("gvd:files:roots", () => files.list(), []);
   handle("gvd:files:pick", async (e, a) => {
@@ -120,7 +148,7 @@ function setUpTikTok({ electron, appOrigin, log, icon, overrides = {} }) {
   // ---- Google Drive ----
   handle("gvd:drive:connect", () => drive.connect(), { ok: false, error: "Not allowed." });
 
-  return Object.assign(poster, { files, drive });
+  return Object.assign(poster, { files, drive, accounts });
 }
 
 module.exports = { setUpTikTok };
