@@ -326,7 +326,7 @@ const TARGETS = {
   // TikTok Studio shows "Add link" as a label with a "+ Add" button beside it (Drew's post: the AI
   // pressed "Add" every time, 2026-10-05): an Add button next to the words "Add link".
   addLink: [{ css: '[data-e2e="add_link_button"]' }, { text: "^\\+?\\s*add link$", within: BTN }, { css: "button, [role=button]", has: "^\\+?\\s*add$", near: "\\b(add )?link\\b", notIn: DLG_ANY }],
-  productsOption: [{ css: '[data-e2e="link_type_products"]' }, { text: "^((tiktok )?shop )?products?$", within: inDlg("[role=option], [role=tab], [role=radio], button, label, li") }],
+  productsOption: [{ css: '[data-e2e="link_type_products"]' }, { text: "^((tiktok )?shop |showcase )?products?$", within: inDlg("[role=option], [role=tab], [role=radio], button, label, li") }],
   linkNext: [{ text: "^next$", within: DLG_BTN }],
   productSearch: [{ css: 'input[placeholder*="Search product" i]' }, { css: `${DLG} input[type="search"]` }, { css: `${DLG} input[placeholder*="Search" i]` }],
   // The product rows, most specific first. TikTok's showcase is a table with a radio per row; the old
@@ -407,7 +407,7 @@ const STEP_HELP = {
   wait_processed: "Groot can't tell if TikTok finished uploading. When the video shows as uploaded in the TikTok window, press Post yourself.",
   caption: "Groot couldn't write the description. In the TikTok window, click the description box and type it yourself.",
   product_open: "Groot can't find Add link. In the TikTok window, press Add link under the description.",
-  product_tab: "In the TikTok window, choose Products in the Add link box, then press Next.",
+  product_tab: "In the TikTok window, choose Products (or Showcase product) in the Add link box, then press Next.",
   product_search: "In the TikTok window, search your showcase for the product.",
   product_pick: "In the TikTok window, select the product in the list.",
   product_next: "In the TikTok window, press Next in the product box.",
