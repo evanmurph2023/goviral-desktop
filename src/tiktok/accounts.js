@@ -59,6 +59,11 @@ const TRYBE_CHECK = `(() => { try {
   return s && s.refresh_token ? { signedIn: true, handle: (s.user && s.user.email) || null } : { signedIn: false };
 } catch (e) { return null; } })()`;
 
+// The cookies the cloud hand-over may send: TikTok's sign-in cookies only (the platform's
+// pickTiktokSession keeps the same list). Everything else in the TikTok window (ads, Shop seller
+// pages, analytics) stays on this computer, and the body stays under the platform's 64 KB cap.
+const SESSION_COOKIES = /^(sessionid|sessionid_ss|sid_tt|sid_guard|sid_ucp_v1|ssid_ucp_v1|uid_tt|uid_tt_ss|tt-target-idc|tt-target-idc-sign|tt_csrf_token|tt_chain_token|msToken|ttwid|odin_tt|passport_csrf_token|passport_csrf_token_default|cmpl_token|multi_sids|store-idc|store-country-code|store-country-code-src|tt_session_tlb_tag|s_v_web_id|living_user_id|passport_auth_status|passport_auth_status_ss|perf_feed_cache)$/;
+
 function createAccounts({ electron, userData, windowOf = () => null, partitions = { tiktok: "persist:tiktok", trybe: "persist:trybe" }, trybeOrigin = TRYBE_ORIGIN, log = () => {}, now = () => Date.now() }) {
   const file = path.join(userData, "groot-reads.json");
   const load = () => { try { const j = JSON.parse(fs.readFileSync(file, "utf8")); return j && typeof j === "object" ? j : {}; } catch { return {}; } };
@@ -87,7 +92,7 @@ function createAccounts({ electron, userData, windowOf = () => null, partitions 
     const t = now() / 1000;
     const all = await ses.cookies.get({});
     const cookies = all
-      .filter((c) => c && c.value && /(^|\.)tiktok\.com$/.test(String(c.domain || "").replace(/^\./, "")) && (!c.expirationDate || c.expirationDate > t))
+      .filter((c) => c && c.value && SESSION_COOKIES.test(String(c.name || "")) && /(^|\.)tiktok\.com$/.test(String(c.domain || "").replace(/^\./, "")) && (!c.expirationDate || c.expirationDate > t))
       .map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path || "/", expires: c.session || !c.expirationDate ? -1 : Math.floor(c.expirationDate), httpOnly: !!c.httpOnly, secure: !!c.secure, sameSite: c.sameSite === "strict" ? "Strict" : c.sameSite === "no_restriction" ? "None" : "Lax" }));
     if (!cookies.some((c) => /^sessionid(_ss)?$/.test(c.name))) return null;
     const ua = String(userAgent || ses.getUserAgent() || "").replace(/\s(?:GoViralDesktop|Electron|goviral-desktop)\/\S+/g, "");

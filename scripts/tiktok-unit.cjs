@@ -521,8 +521,10 @@ pending.push((async () => {
   const jar = [
     { name: "sessionid", value: "s1", domain: ".tiktok.com", path: "/", expirationDate: now / 1000 + 9999, httpOnly: true, secure: true, sameSite: "no_restriction" },
     { name: "ttwid", value: "t1", domain: ".tiktok.com", path: "/", session: true, httpOnly: true, secure: true, sameSite: "no_restriction" },
-    { name: "old", value: "x", domain: ".tiktok.com", path: "/", expirationDate: now / 1000 - 5 },
+    { name: "sid_guard", value: "x", domain: ".tiktok.com", path: "/", expirationDate: now / 1000 - 5 },
     { name: "sb-x", value: "trybe", domain: "jointrybe.com", path: "/" },
+    { name: "_ga", value: "analytics", domain: ".tiktok.com", path: "/" },
+    { name: "seller_big", value: "x".repeat(4000), domain: "seller-us.tiktok.com", path: "/" },
     { name: "sessionid", value: "evil", domain: "tiktok.com.evil.example", path: "/" },
   ];
   let cookies = jar;
