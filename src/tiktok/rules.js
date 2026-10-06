@@ -449,30 +449,80 @@ const NOT_IN_SHOWCASE = "That product isn't in your TikTok Shop showcase";
 const KEYS = ["Enter", "Tab", "Escape", "Backspace"];
 const MAX_AI_PER_STEP = 8;
 const MAX_AI_PER_POST = 25;
-function validateAction(a, view, values) {
+// ---- what the AI and a learned fix may never press on a TikTok post step (2026-10-06 review) ------
+// Drew's hard rule: TikTok's AI-generated and branded-content switches are never touched. Discard
+// and Delete are never pressed. Post / Publish only on the post steps (never during Manual, never on
+// the privacy or product steps). The same rules are on the platform (src/lib/groot-post.ts
+// forbiddenFor) and checked again on a learned fix's element right before it is pressed.
+const NEVER_TOUCH = /ai[\s-]*generated|\baigc\b|branded[\s-]*content|paid[\s-]*partnership|content[\s-]*disclosure|disclose|promotional[\s-]*content/i;
+const NEVER_PRESS = /^\s*(discard|delete)\b/i;
+const POST_WORDS = /^\s*(post( now)?|publish( now)?|schedule)\s*$/i;
+const POST_E2E = /post_video_button|publish/i;
+const POST_STEPS = new Set(["post", "confirm_posted"]);
+function forbiddenFor(el, step) {
+  if (!el || typeof el !== "object") return null;
+  const own = [el.name, el.label, el.text].filter((t) => typeof t === "string" && t);
+  const all = [...own, el.e2e, el.near].filter((t) => typeof t === "string" && t);
+  if (all.some((t) => NEVER_TOUCH.test(t))) return "Groot never changes TikTok's AI-generated or branded-content settings.";
+  if (own.some((t) => NEVER_PRESS.test(t))) return "Groot never discards or deletes anything.";
+  if (!POST_STEPS.has(step) && (own.some((t) => POST_WORDS.test(t)) || POST_E2E.test(el.e2e || ""))) return "Groot only presses Post when it's time to post.";
+  return null;
+}
+
+// `step` (the TikTok engine's step; trybe and reads leave it out) turns on the post-step rules:
+// forbiddenFor on every element pressed, typed into or emptied (and every element under a point
+// click), and on the name steps only a cleaned name typed into a field of the dialog, never an
+// emptied box or a Backspace (the product's name is never the AI's to change).
+function validateAction(a, view, values, step) {
   const stop = (message) => ({ action: "need_user", reason: "other", message });
   if (!a || typeof a !== "object") return stop("Groot couldn't work out the next step.");
   const els = (view && view.elements) || [];
   const has = (ref) => els.some((e) => e.ref === ref);
+  const el = (ref) => els.find((e) => e.ref === ref) || null;
   const pw = (ref) => els.some((e) => e.ref === ref && (e.type === "password" || /password/i.test(e.name || "")));
+  const nameStep = !!step && NAME_STEPS.has(step);
+  const guard = (ref) => (step ? forbiddenFor(el(ref), step) : null);
   switch (a.action) {
     case "click":
-      if (Number.isInteger(a.ref)) return !has(a.ref) ? stop("Groot pointed at something that isn't there.") : pw(a.ref) ? { action: "need_user", reason: "password", message: "TikTok wants your password. Type it yourself." } : { action: "click", ref: a.ref };
-      if (Number.isFinite(a.x) && Number.isFinite(a.y) && a.x >= 0 && a.y >= 0 && a.x <= view.width && a.y <= view.height) return { action: "click", x: a.x, y: a.y };
+      if (Number.isInteger(a.ref)) {
+        if (!has(a.ref)) return stop("Groot pointed at something that isn't there.");
+        if (pw(a.ref)) return { action: "need_user", reason: "password", message: "TikTok wants your password. Type it yourself." };
+        const no = guard(a.ref);
+        return no ? stop(no) : { action: "click", ref: a.ref };
+      }
+      if (Number.isFinite(a.x) && Number.isFinite(a.y) && a.x >= 0 && a.y >= 0 && a.x <= view.width && a.y <= view.height) {
+        if (step) {
+          // a point on (or inside) something it may not press is the same as pressing it
+          const area = (view.width || 1) * (view.height || 1);
+          const under = els.filter((e) => a.x >= e.x && a.x <= e.x + e.w && a.y >= e.y && a.y <= e.y + e.h && e.w * e.h <= area / 4);
+          const no = under.map((e) => forbiddenFor(e, step)).find(Boolean);
+          if (no) return stop(no);
+        }
+        return { action: "click", x: a.x, y: a.y };
+      }
       return stop("Groot pointed off the page.");
     case "type": {
       const text = typeof a.text === "string" ? a.text.trim() : "";
       if (!text || !values.map((v) => (v || "").trim()).filter(Boolean).includes(text)) return stop("Groot tried to type something that isn't this post's.");
       if (a.ref !== null && a.ref !== undefined && (!Number.isInteger(a.ref) || !has(a.ref))) return stop("Groot pointed at something that isn't there.");
       if (Number.isInteger(a.ref) && pw(a.ref)) return { action: "need_user", reason: "password", message: "TikTok wants your password. Type it yourself." };
+      if (nameStep) {
+        const f = Number.isInteger(a.ref) ? el(a.ref) : null;
+        if (!f || !f.dlg || f.type === "search" || f.disabled) return stop("Groot may only fix the product name in its own field.");
+      }
+      if (Number.isInteger(a.ref) && guard(a.ref)) return stop(guard(a.ref));
       return { action: "type", text, ref: Number.isInteger(a.ref) ? a.ref : null, ...(a.clear === true ? { clear: true } : {}) };
     }
     // empty a box (select all, delete) before typing into it again
     case "clear":
       if (!Number.isInteger(a.ref) || !has(a.ref)) return stop("Groot pointed at something that isn't there.");
       if (pw(a.ref)) return { action: "need_user", reason: "password", message: "TikTok wants your password. Type it yourself." };
+      if (nameStep) return stop("Groot never empties the product name.");
+      if (guard(a.ref)) return stop(guard(a.ref));
       return { action: "clear", ref: a.ref };
-    case "press": return KEYS.includes(a.key) ? { action: "press", key: a.key } : stop("Groot tried a key it isn't allowed to press.");
+    case "press":
+      if (nameStep && a.key === "Backspace") return stop("Groot never deletes from the product name.");
+      return KEYS.includes(a.key) ? { action: "press", key: a.key } : stop("Groot tried a key it isn't allowed to press.");
     case "scroll": return Number.isFinite(a.dy) ? { action: "scroll", dy: Math.max(-2000, Math.min(2000, a.dy)) } : stop("Groot couldn't work out the next step.");
     case "wait": return { action: "wait", ms: Math.max(300, Math.min(5000, Number(a.ms) || 1500)) };
     case "done": return { action: "done" };
@@ -483,8 +533,11 @@ function validateAction(a, view, values) {
 
 // The text the AI may type on a step: the caption, the product, and on the name steps the cleaned
 // names of what TikTok shows in the dialog. The platform allows the same (groot-post.ts).
+// On the name steps ONLY the cleaned names (2026-10-06 review: the caption or the product typed with
+// clear into the name field would have renamed the product).
 function typeValues(step, job, view) {
-  return [captionText(job.caption, job.hashtags), job.product || "", ...(NAME_STEPS.has(step) ? nameFixes(view) : [])];
+  if (NAME_STEPS.has(step)) return nameFixes(view);
+  return [captionText(job.caption, job.hashtags), job.product || ""];
 }
 // A plan from the AI: at most this many actions in one answer (the platform caps it too).
 const MAX_PLAN = 5;
@@ -546,9 +599,16 @@ function variantOf(view) {
 }
 const RECIPE_DO = new Set(["click", "clear", "type", "press"]);
 // A recipe from the platform, checked before it is used: known actions, targets that describe
-// something, at most MAX_PLAN + 1 actions.
-function isRecipe(r) {
-  return Array.isArray(r) && r.length > 0 && r.length <= MAX_PLAN + 1 && r.every((a) => a && RECIPE_DO.has(a.do) && (a.do === "press" ? KEYS.includes(a.key) : a.target && typeof a.target === "object" && (a.target.role || a.target.tag)) && (a.do !== "type" || a.value === "clean_name"));
+// something, at most MAX_PLAN + 1 actions. With the step: nothing forbiddenFor (the AI-generated /
+// branded-content switches, Discard, Delete, Post off the post steps), and on the name steps no
+// emptied box and no Backspace (a learned fix never changes the product name beyond cleaning it).
+function isRecipe(r, step) {
+  if (!(Array.isArray(r) && r.length > 0 && r.length <= MAX_PLAN + 1 && r.every((a) => a && RECIPE_DO.has(a.do) && (a.do === "press" ? KEYS.includes(a.key) : a.target && typeof a.target === "object" && (a.target.role || a.target.tag)) && (a.do !== "type" || a.value === "clean_name")))) return false;
+  // typing and emptying only ever in a dialog's field (never the description box)
+  if (r.some((a) => (a.do === "type" || a.do === "clear") && a.target.dlg !== true)) return false;
+  if (!step) return true;
+  if (NAME_STEPS.has(step) && r.some((a) => a.do === "clear" || (a.do === "press" && a.key === "Backspace"))) return false;
+  return !r.some((a) => a.target && forbiddenFor({ ...a.target, name: a.target.text || a.target.label }, step));
 }
 
 // ---- human pacing --------------------------------------------------------------------------------
@@ -575,6 +635,6 @@ module.exports = { isProductRow, SHOWCASE_PAGES,
   isAllowedCaller, isVideoUrl, isTikTokUrl, isLoginProviderUrl, parseSource, validatePostRequest, captionText, safeFileName,
   productWords, productScore, pickProduct, searchTerms, cleanProductName, nameFixes, NAME_STEPS, MAX_VALUE, REJECTED_CHARS,
   PRIVACY, PRIVACY_VALUES, parsePrivacy, privacyOf, privacyOptionWays,
-  LEARNABLE, MAX_PLAN, typeValues, describeElement, learnedWays, variantOf, isRecipe, scrubRecipe,
+  LEARNABLE, MAX_PLAN, typeValues, describeElement, learnedWays, variantOf, isRecipe, scrubRecipe, forbiddenFor,
   planSteps, validateAction, delay, chunks,
 };

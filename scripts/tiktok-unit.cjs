@@ -143,6 +143,53 @@ test("learning: what an element is (no personal words), the page variant, recipe
   const scrubbed = R.scrubRecipe([{ do: "click", target: { role: "button", tag: "button", text: "Add", near: "uploading 50% description comfy weekend slippers #cozyvibes" } }, { do: "click", target: { role: "div", tag: "div", text: "Comfrt chip", label: "@drew" } }, { do: "press", key: "Enter" }], job);
   assert.deepStrictEqual(scrubbed, [{ do: "click", target: { role: "button", tag: "button", text: "Add" } }, { do: "click", target: { role: "div", tag: "div" } }, { do: "press", key: "Enter" }], "the post's own words never leave this computer in a fix");
 });
+test("review 2026-10-06: the AI and a learned fix never press the AI-generated / branded switches, Discard, or Post off the post step; never rename the product", () => {
+  const view = { width: 1000, height: 800, elements: [
+    { ref: 0, role: "input", tag: "input", type: "text", value: "Comfrt | Weekend Slipper", dlg: true, name: "" },
+    { ref: 1, role: "button", tag: "button", name: "Add", dlg: true },
+    { ref: 2, role: "button", tag: "button", name: "Post", e2e: "post_video_button", x: 800, y: 700, w: 80, h: 40 },
+    { ref: 3, role: "switch", tag: "button", name: "", near: "ai-generated content", x: 900, y: 500, w: 40, h: 20 },
+    { ref: 4, role: "switch", tag: "button", name: "Branded content", x: 900, y: 550, w: 40, h: 20 },
+    { ref: 5, role: "button", tag: "button", name: "Discard", x: 700, y: 700, w: 80, h: 40 },
+    { ref: 6, role: "textbox", tag: "div", name: "", value: "my caption #tag" },
+    { ref: 7, role: "combobox", tag: "div", name: "Everyone", near: "who can watch this video" },
+  ] };
+  const job = { caption: "my caption", hashtags: ["tag"], product: "comfort slipper" };
+  const v = (a, step, vals = R.typeValues(step, job, view)) => R.validateAction(a, view, vals, step);
+  // Drew's hard rule: the AI-generated / branded-content switches, on every step, by ref or by point
+  for (const step of ["privacy", "post", "product_add", "wait_processed"]) {
+    assert.strictEqual(v({ action: "click", ref: 3 }, step).action, "need_user", `AI-generated switch on ${step}`);
+    assert.strictEqual(v({ action: "click", ref: 4 }, step).action, "need_user", `branded content on ${step}`);
+    assert.strictEqual(v({ action: "click", x: 910, y: 505 }, step).action, "need_user", `a point on the AI-generated switch on ${step}`);
+    assert.strictEqual(v({ action: "click", ref: 5 }, step).action, "need_user", `Discard on ${step}`);
+  }
+  // Post only on the post steps (the privacy step runs in Manual too)
+  assert.strictEqual(v({ action: "click", ref: 2 }, "privacy").action, "need_user");
+  assert.strictEqual(v({ action: "click", x: 820, y: 710 }, "privacy").action, "need_user", "a point on Post");
+  assert.strictEqual(v({ action: "click", ref: 2 }, "product_add").action, "need_user");
+  assert.deepStrictEqual(v({ action: "click", ref: 2 }, "post"), { action: "click", ref: 2 });
+  assert.deepStrictEqual(v({ action: "click", ref: 7 }, "privacy"), { action: "click", ref: 7 }, "the privacy dropdown itself is fine");
+  // the name steps: only a cleaned name, only into a dialog field; never the caption / product, never emptied, no Backspace
+  assert.strictEqual(v({ action: "type", text: "my caption #tag", ref: 0, clear: true }, "product_name").action, "need_user", "the caption over the product name");
+  assert.strictEqual(v({ action: "type", text: "comfort slipper", ref: 0, clear: true }, "product_add").action, "need_user", "the product words over TikTok's name");
+  assert.strictEqual(v({ action: "type", text: "Comfrt Weekend Slipper", ref: 6, clear: true }, "product_add").action, "need_user", "a cleaned name into the description box");
+  assert.strictEqual(v({ action: "type", text: "Comfrt Weekend Slipper", ref: null }, "product_add").action, "need_user", "a cleaned name into whatever has focus");
+  assert.deepStrictEqual(v({ action: "type", text: "Comfrt Weekend Slipper", ref: 0, clear: true }, "product_add"), { action: "type", text: "Comfrt Weekend Slipper", ref: 0, clear: true });
+  assert.strictEqual(v({ action: "clear", ref: 0 }, "product_name").action, "need_user", "never empties the name");
+  assert.strictEqual(v({ action: "press", key: "Backspace" }, "product_name").action, "need_user");
+  assert.deepStrictEqual(v({ action: "clear", ref: 6 }, "caption"), { action: "clear", ref: 6 }, "the description box may be emptied on the caption step");
+  // learned fixes: the same rules, and typing / emptying only in a dialog
+  const btn = (text, extra = {}) => ({ role: "button", tag: "button", text, ...extra });
+  assert(!R.isRecipe([{ do: "click", target: btn("Post") }], "privacy"), "a learned Post on the privacy step (Manual)");
+  assert(R.isRecipe([{ do: "click", target: btn("Post") }], "post"));
+  assert(!R.isRecipe([{ do: "click", target: btn("Discard") }], "product_add"));
+  assert(!R.isRecipe([{ do: "click", target: { role: "switch", tag: "button", near: "ai-generated content" } }], "privacy"));
+  assert(!R.isRecipe([{ do: "click", target: { role: "button", tag: "button", e2e: "post_video_button" } }], "privacy"));
+  assert(!R.isRecipe([{ do: "clear", target: btn("x", { dlg: true }) }], "product_name"), "a learned fix never empties the name");
+  assert(!R.isRecipe([{ do: "press", key: "Backspace" }], "product_add"));
+  assert(!R.isRecipe([{ do: "type", value: "clean_name", target: { role: "textbox", tag: "div", label: "Description" } }], "product_add"), "a cleaned name only into a dialog field");
+  assert(R.isRecipe([{ do: "type", value: "clean_name", target: { role: "input", tag: "input", near: "product name", dlg: true } }, { do: "click", target: btn("Add", { dlg: true }) }], "product_add"));
+});
 test("Manual stops at the handoff and never posts", () => {
   const s = R.planSteps({ mode: "manual", product: "Hydro" });
   assert.strictEqual(s[s.length - 1], "handoff");

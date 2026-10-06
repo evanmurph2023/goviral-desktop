@@ -56,7 +56,7 @@
 // error, code, step, steps, ms, aiSteps }.
 "use strict";
 
-const { TARGETS, AI_STEPS, STEP_WORDS, STEP_HELP, TIMEOUTS, MAX_AI_PER_STEP, MAX_AI_PER_POST, NOT_IN_SHOWCASE, planSteps, validateAction, captionText, captionParts, normCaption, showcaseList, pickProduct, searchTerms, isProductRow, SHOWCASE_PAGES, cleanProductName, productScore, PICK_AT, TIKTOK_UPLOAD_URL, KEYS, PRIVACY, parsePrivacy, privacyOf, privacyOptionWays, LEARNABLE, MAX_PLAN, NAME_STEPS, typeValues, describeElement, learnedWays, variantOf, isRecipe, scrubRecipe } = require("./rules");
+const { TARGETS, AI_STEPS, STEP_WORDS, STEP_HELP, TIMEOUTS, MAX_AI_PER_STEP, MAX_AI_PER_POST, NOT_IN_SHOWCASE, planSteps, validateAction, captionText, captionParts, normCaption, showcaseList, pickProduct, searchTerms, isProductRow, SHOWCASE_PAGES, cleanProductName, productScore, PICK_AT, TIKTOK_UPLOAD_URL, KEYS, PRIVACY, parsePrivacy, privacyOf, privacyOptionWays, LEARNABLE, MAX_PLAN, NAME_STEPS, typeValues, describeElement, learnedWays, variantOf, isRecipe, scrubRecipe, forbiddenFor } = require("./rules");
 
 class StepMissed extends Error {}
 class Failed extends Error { constructor(message, code) { super(message); this.code = code || null; } }
@@ -637,7 +637,7 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
       new Promise((r) => { timer = setTimeout(() => r(null), 5000); }),
     ]).then((r) => {
       clearTimeout(timer);
-      learned.list = r && r.ok && Array.isArray(r.targets) ? r.targets.filter((t) => t && typeof t.id === "string" && LEARNABLE.has(t.step) && isRecipe(t.recipe)).slice(0, 40) : [];
+      learned.list = r && r.ok && Array.isArray(r.targets) ? r.targets.filter((t) => t && typeof t.id === "string" && LEARNABLE.has(t.step) && isRecipe(t.recipe, t.step)).slice(0, 40) : [];
       if (learned.list.length) log("tiktok learned fixes", learned.list.length, learned.list.map((t) => `${t.step}(${t.scope || "?"})`).join(" "));
       return learned.list;
     });
@@ -663,6 +663,10 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
       if (act.do === "press") { await page.key(act.key); continue; }
       const hit = await waitFor(learnedWays(act.target, wantPrivacy(job)), { ms: 3000 });
       if (!hit) return `${targetWords(act.target)} isn't on the page`;
+      // what it found is checked again by its own words (a learned description can match the wrong
+      // thing on a changed page): never Post off the post steps, Discard, or the AI / branded switches
+      const no = forbiddenFor({ name: hit.text }, step);
+      if (no) return `${targetWords(act.target)} matched "${short(hit.text, 30)}", which Groot never presses here`;
       if (act.do === "click") { await page.clickRef(hit.ref); continue; }
       if (act.do === "clear") { await page.clickRef(hit.ref); await page.clearFocused(); continue; }
       // type: only ever a cleaned name, worked out now from what the field holds
@@ -700,7 +704,7 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     if (!LEARNABLE.has(step) || !raw.length || raw.length > MAX_PLAN + 1 || raw.some((r) => !r)) return;
     const recipe = scrubRecipe(raw, job);
     // every target must still say how to find it (words, a label, data-e2e...) once the post's own words are out
-    if (!isRecipe(recipe) || recipe.some((a) => a.target && !(a.target.text || a.target.label || a.target.e2e || a.target.ph || a.target.near || a.target.privacy))) return;
+    if (!isRecipe(recipe, step) || recipe.some((a) => a.target && !(a.target.text || a.target.label || a.target.e2e || a.target.ph || a.target.near || a.target.privacy))) return;
     learned.saved++;
     tell({ solved: { step, variant, recipe } });
     note("what worked is saved for next time");
@@ -749,7 +753,7 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
         new Promise((r) => { timer = setTimeout(() => r({ ok: false, error: `Groot didn't answer in ${Math.round(T.ai / 1000)} s.` }), T.ai); }),
       ]).finally(() => clearTimeout(timer));
       if (!res || !res.ok) { log("tiktok ai unavailable", step, secs(Date.now() - t0), (res && res.error) || ""); throw new Failed((res && res.error) || "Groot couldn't see the page."); }
-      const plan = (Array.isArray(res.actions) && res.actions.length ? res.actions : [res.action]).slice(0, MAX_PLAN).map((x) => validateAction(x, view, values));
+      const plan = (Array.isArray(res.actions) && res.actions.length ? res.actions : [res.action]).slice(0, MAX_PLAN).map((x) => validateAction(x, view, values, step));
       const did = [];
       for (let k = 0; k < plan.length; k++) {
         const a = plan[k];
