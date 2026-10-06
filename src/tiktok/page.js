@@ -19,6 +19,11 @@ function stopped() { const e = new Error("Stopped"); e.stopped = true; return e;
 
 // Runs in the isolated world. Finds the first match of a list of ways (see rules.js TARGETS),
 // keeps the element in the world's own list and returns its ref and box.
+// Ways (2026-10-06): a css way may also say `near` (a regex the words AROUND the element must match:
+// its label), `has` (a regex its own words must match), `notIn` (a selector it must not be inside),
+// `valueRe` (a regex its value must match). `learned` finds an element the AI found before, from its
+// description (rules.js describeElement): data-e2e, role, words, aria-label, placeholder, dialog,
+// the words around it; the best match wins.
 const FIND = function (arg) {
   const g = (window.__gv = window.__gv || { els: [] });
   const visible = (el) => {
@@ -29,11 +34,68 @@ const FIND = function (arg) {
   };
   const ownText = (el) => (el.getAttribute("aria-label") || el.innerText || el.value || el.getAttribute("placeholder") || "").replace(/\s+/g, " ").trim();
   const words = (t) => t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 1);
+  const DLG = '[role=dialog], [aria-modal="true"], [class*="TUXModal"]';
+  const roleOf = (el) => el.getAttribute("role") || (el.isContentEditable ? "textbox" : el.tagName.toLowerCase());
+  const norm = (t) => String(t || "").replace(/\s+/g, " ").trim().toLowerCase();
+  // the words around an element: the nearest parent (up to 4 up, short) with words of its own
+  const nearOf = (el) => {
+    const own = norm(el.innerText);
+    let a = el.parentElement;
+    for (let i = 0; a && i < 4; i++, a = a.parentElement) {
+      const t = norm(a.innerText);
+      if (t.length > 120) break; // a label, not a whole form (which would carry the caption)
+      const rest = (own ? t.split(own).join(" ") : t).replace(/\s+/g, " ").trim();
+      if (/\p{L}{3}/u.test(rest)) return rest.slice(0, 60);
+    }
+    return "";
+  };
+  // a regex over the text around it: any parent up to 5 up with at most 400 characters
+  const around = (el, re) => {
+    let a = el.parentElement;
+    for (let i = 0; a && i < 5; i++, a = a.parentElement) {
+      const t = (a.innerText || "").replace(/\s+/g, " ").trim();
+      if (t.length > 400) return false;
+      if (re.test(t)) return true;
+    }
+    return false;
+  };
+  const valueOf = (el) => (el.tagName === "INPUT" || el.tagName === "TEXTAREA" ? el.value || "" : el.isContentEditable ? el.innerText || "" : "");
+  const LEARNED_SEL = 'a[href], button, input, textarea, select, [role=button], [role=link], [role=checkbox], [role=radio], [role=option], [role=tab], [role=menuitem], [role=menuitemradio], [role=combobox], [role=textbox], [role=switch], [contenteditable="true"], label, [data-e2e], [aria-haspopup], li, div[tabindex], span[tabindex]';
   for (let wi = 0; wi < arg.ways.length; wi++) {
     const way = arg.ways[wi];
     let found = null;
     if (way.css) {
-      for (const el of document.querySelectorAll(way.css)) if (way.hidden || visible(el)) { found = el; break; }
+      const nearRe = way.near ? new RegExp(way.near, "iu") : null;
+      const hasRe = way.has ? new RegExp(way.has, "iu") : null;
+      const valRe = way.valueRe ? new RegExp(way.valueRe, "u") : null;
+      for (const el of document.querySelectorAll(way.css)) {
+        if (!(way.hidden || visible(el))) continue;
+        if (way.notIn && el.closest(way.notIn)) continue;
+        if (hasRe && !hasRe.test(el.tagName === "SELECT" ? ((el.selectedOptions && el.selectedOptions[0]) || {}).text || "" : (el.innerText || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim())) continue;
+        if (valRe && !valRe.test(valueOf(el))) continue;
+        if (nearRe && !around(el, nearRe)) continue;
+        found = el;
+        break;
+      }
+    } else if (way.learned) {
+      const L = way.learned;
+      let best = 0;
+      let sel = LEARNED_SEL;
+      if (L.e2e) { try { sel = `[data-e2e="${CSS.escape(L.e2e)}"]`; } catch { sel = LEARNED_SEL; } }
+      for (const el of document.querySelectorAll(sel)) {
+        if (!visible(el)) continue;
+        if (L.role && roleOf(el) !== L.role) continue;
+        if (!!L.dlg !== !!el.closest(DLG)) continue;
+        if (L.type && el.tagName === "INPUT" && (el.getAttribute("type") || "text").toLowerCase() !== L.type) continue;
+        let s = 1 + (L.e2e ? 4 : 0);
+        let named = !(L.label || L.text || L.ph);
+        if (L.label && norm(el.getAttribute("aria-label")) === norm(L.label)) { s += 3; named = true; }
+        if (L.text && norm(el.innerText || el.value) === norm(L.text)) { s += 3; named = true; }
+        if (L.ph && norm(el.getAttribute("placeholder")) === norm(L.ph)) { s += 2; named = true; }
+        if (!named && !L.e2e) continue;
+        if (L.near) { if (nearOf(el).includes(norm(L.near))) s += 2; else s -= 1; }
+        if (s > best) { best = s; found = el; }
+      }
     } else if (way.text) {
       const re = new RegExp(way.text, "i");
       const all = [...document.querySelectorAll(way.within || "*")].filter((el) => visible(el) && re.test(ownText(el)));
@@ -123,18 +185,39 @@ const ROWS = function (arg) {
   return [];
 };
 
-// Runs in the isolated world: what is on screen and can be pressed or typed into, numbered.
+// Runs in the isolated world: what is on screen and can be pressed or typed into, numbered. Each
+// element also carries what the AI and the learning need (2026-10-06): its data-e2e, aria-label,
+// own words, placeholder, whether it is in a dialog, the words around it (its label), and a box's
+// value (up to 300 characters; a contenteditable's words). The page's open dialog title and any
+// error / alert notices on screen ride along.
 const SNAPSHOT = function () {
   const g = (window.__gv = window.__gv || { els: [] });
   g.els = [];
-  const sel = 'a[href], button, input, textarea, select, [role=button], [role=link], [role=checkbox], [role=radio], [role=option], [role=tab], [role=menuitem], [role=combobox], [role=textbox], [role=switch], [role=dialog] [tabindex], [contenteditable="true"], label, [data-e2e]';
+  const sel = 'a[href], button, input, textarea, select, [role=button], [role=link], [role=checkbox], [role=radio], [role=option], [role=tab], [role=menuitem], [role=menuitemradio], [role=combobox], [role=textbox], [role=switch], [role=dialog] [tabindex], [contenteditable="true"], label, [data-e2e], [aria-haspopup]';
+  const DLG = '[role=dialog], [aria-modal="true"], [class*="TUXModal"]';
+  const norm = (t) => String(t || "").replace(/\s+/g, " ").trim();
+  const shown = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.right < 0 || r.top > innerHeight || r.left > innerWidth) return null;
+    const s = getComputedStyle(el);
+    return s.visibility === "hidden" || s.display === "none" || Number(s.opacity) < 0.05 ? null : r;
+  };
+  const nearOf = (el) => {
+    const own = norm(el.innerText).toLowerCase();
+    let a = el.parentElement;
+    for (let i = 0; a && i < 4; i++, a = a.parentElement) {
+      const t = norm(a.innerText);
+      if (t.length > 120) break; // a label, not a whole form (which would carry the caption)
+      const rest = norm(own ? t.toLowerCase().split(own).join(" ") : t.toLowerCase());
+      if (/\p{L}{3}/u.test(rest)) return rest.slice(0, 60);
+    }
+    return "";
+  };
   const out = [];
   for (const el of document.querySelectorAll(sel)) {
     if (out.length >= 250) break;
-    const r = el.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.right < 0 || r.top > innerHeight || r.left > innerWidth) continue;
-    const s = getComputedStyle(el);
-    if (s.visibility === "hidden" || s.display === "none" || Number(s.opacity) < 0.05) continue;
+    const r = shown(el);
+    if (!r) continue;
     const type = el.tagName === "INPUT" ? (el.getAttribute("type") || "text").toLowerCase() : undefined;
     const name = (el.getAttribute("aria-label") || el.innerText || el.getAttribute("placeholder") || el.getAttribute("title") || el.getAttribute("data-e2e") || "").replace(/\s+/g, " ").trim().slice(0, 100);
     const role = el.getAttribute("role") || (el.isContentEditable ? "textbox" : el.tagName.toLowerCase());
@@ -142,10 +225,52 @@ const SNAPSHOT = function () {
     const e = { ref: g.els.length - 1, role, name, tag: el.tagName.toLowerCase(), x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
     if (type) e.type = type;
     if (el.disabled || el.getAttribute("aria-disabled") === "true") e.disabled = true;
-    if (type && type !== "password" && type !== "file" && el.value) e.value = String(el.value).slice(0, 80);
+    if (el.checked === true || el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true") e.checked = true;
+    if ((type === "radio" || type === "checkbox") && el.value) { /* a radio's value isn't text anyone typed */ }
+    else if (type && type !== "password" && type !== "file" && el.value) e.value = String(el.value).slice(0, 300);
+    else if (el.tagName === "TEXTAREA" && el.value) e.value = String(el.value).slice(0, 300);
+    else if (el.isContentEditable && el.innerText) e.value = norm(el.innerText).slice(0, 300);
+    else if (el.tagName === "SELECT" && el.selectedOptions && el.selectedOptions[0]) e.value = norm(el.selectedOptions[0].text).slice(0, 80);
+    const e2e = el.getAttribute("data-e2e");
+    if (e2e) e.e2e = e2e.slice(0, 60);
+    const label = el.getAttribute("aria-label");
+    if (label) e.label = norm(label).slice(0, 80);
+    const own = el.isContentEditable || el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" ? "" : norm(el.innerText);
+    if (own) e.text = own.slice(0, 80);
+    const ph = el.getAttribute("placeholder");
+    if (ph) e.ph = norm(ph).slice(0, 60);
+    if (el.closest(DLG)) e.dlg = true;
+    const near = nearOf(el);
+    if (near) e.near = near;
     out.push(e);
   }
-  return { width: innerWidth, height: innerHeight, url: location.href, elements: out };
+  let dialog = "";
+  for (const d of document.querySelectorAll('[role=dialog], [aria-modal="true"]')) {
+    if (!shown(d)) continue;
+    const h = d.querySelector("h1, h2, h3, h4, [class*=title i]");
+    dialog = norm(d.getAttribute("aria-label") || (h && h.innerText) || "").slice(0, 60);
+    if (dialog) break;
+  }
+  const notices = [];
+  for (const n of document.querySelectorAll('[role=alert], [aria-live]:not([aria-live=off]), [class*=error i], [class*=toast i], [class*=warning i]')) {
+    if (notices.length >= 6) break;
+    const t = norm(n.innerText);
+    if (!t || t.length > 160 || !shown(n) || notices.some((x) => x.includes(t) || t.includes(x))) continue;
+    notices.push(t);
+  }
+  return { width: innerWidth, height: innerHeight, url: location.href, elements: out, dialog, notices };
+};
+// The page variant, cheaply: the address and the open dialog's title (rules.js variantOf).
+const VARIANT = function () {
+  let dialog = "";
+  for (const d of document.querySelectorAll('[role=dialog], [aria-modal="true"]')) {
+    const r = d.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    const h = d.querySelector("h1, h2, h3, h4, [class*=title i]");
+    dialog = String(d.getAttribute("aria-label") || (h && h.innerText) || "").replace(/\s+/g, " ").trim().slice(0, 60);
+    if (dialog) break;
+  }
+  return { url: location.href, dialog };
 };
 
 const BOX = function (arg) {
@@ -161,7 +286,11 @@ const BOX = function (arg) {
 };
 const TEXT_OF = function (arg) {
   const el = (window.__gv && window.__gv.els[arg.ref]) || null;
-  return el ? (el.innerText || el.value || "").replace(/\s+/g, " ").trim() : null;
+  if (!el) return null;
+  // a <select> reads as its chosen option (innerText would be every option); a box as its value
+  if (el.tagName === "SELECT") return ((el.selectedOptions && el.selectedOptions[0] && el.selectedOptions[0].text) || "").replace(/\s+/g, " ").trim();
+  if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") return String(el.value || "").replace(/\s+/g, " ").trim();
+  return (el.innerText || el.value || "").replace(/\s+/g, " ").trim();
 };
 const FOCUSED_IS_PASSWORD = function () {
   const el = document.activeElement;
@@ -240,6 +369,7 @@ class CdpPage {
   find(ways, value) { return this.run(FIND, { ways, value: value || null }); }
   rows(ways) { return this.run(ROWS, { ways }).then((r) => r || []); }
   snapshot() { return this.run(SNAPSHOT); }
+  variant() { return this.run(VARIANT); }
   textOf(ref) { return this.run(TEXT_OF, { ref }); }
   focusedIsPassword() { return this.run(FOCUSED_IS_PASSWORD); }
 

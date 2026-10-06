@@ -33,15 +33,22 @@ const tick = () => new Promise((r) => setImmediate(r));
 // ---- the fake TikTok Studio ---------------------------------------------------------------------------
 const NAME_OF = new Map(Object.entries(R.TARGETS).map(([k, v]) => [v, k]));
 const SHOWCASE = ["Comfort Weekend Slipper", "Cloud Comfort Slides", "Hydro Flask 40 oz Tumbler", "Stanley Quencher H2.0 40 oz", "Glow Serum Vitamin C 30ml"];
-const ORDER = ["fileInput", "uploaded", "uploadProgress", "captionBox", "addLink", "productsOption", "linkNext", "productSearch", "productNoResults", "productNext", "productNameInput", "productAdd", "dialog", "postButton", "posted", "attachLink"];
+const ORDER = ["fileInput", "uploaded", "uploadProgress", "captionBox", "addLink", "productsOption", "linkNext", "productSearch", "productNoResults", "productNext", "productNameInput", "productNameError", "productAdd", "dialog", "postButton", "posted", "attachLink", "privacyControl", "privacyOpt"];
 const REF = Object.fromEntries(ORDER.map((n, i) => [n, i + 1]));
+const INVALID = /[^\p{L}\p{N} '&.,-]/u; // what the fake TikTok refuses in a link name (like the mock's)
+const PRIVACY_LABEL = { everyone: "Everyone", friends: "Friends", followers: "Followers", only_me: "Only you" };
 
+// opt (2026-10-06): privacy = what "Who can watch" shows at first ("Everyone", "Only you");
+// privacyControl: false = Groot's selectors can't see it; nameError: TikTok says "Invalid
+// characters" (else it only refuses Add); nameHidden: the name field is there but no selector
+// finds it (only the AI's snapshot sees it).
 function fakeStudio(opt = {}) {
   const o = {
     processMs: 4000, progressText: true, uploadedText: true, stuckAt: null, eat: false, eatOnce: false, showcase: SHOWCASE,
-    addLink: true, addLinkOffWhileUploading: false, prefillOnUploaded: false, postOnWhileUploading: false, fileName: "comfort slippers", pageSize: Infinity, searchMode: "all", pageJunk: false, ...opt,
+    addLink: true, addLinkOffWhileUploading: false, prefillOnUploaded: false, postOnWhileUploading: false, fileName: "comfort slippers", pageSize: Infinity, searchMode: "all", pageJunk: false,
+    privacy: "Everyone", privacyControl: true, nameError: true, nameHidden: false, ...opt,
   };
-  const S = { page: null, file: null, fileAt: 0, caption: "", focused: null, suggest: false, sessions: 0, dialog: null, typeChosen: false, search: "", searched: false, rows: [], pageNo: 1, selected: null, nameValue: "", product: null, posted: false, postedAt: 0, prefilled: false, searches: [], captionAtFirstProgress: null, events: [], aborted: false };
+  const S = { page: null, file: null, fileAt: 0, caption: "", focused: null, suggest: false, sessions: 0, dialog: null, typeChosen: false, search: "", searched: false, rows: [], pageNo: 1, selected: null, nameValue: "", product: null, productName: null, posted: false, postedAt: 0, prefilled: false, searches: [], captionAtFirstProgress: null, events: [], aborted: false, privacy: o.privacy, privacyOpen: false, privacyWant: null, privacyAtPost: null, addRefused: 0 };
   const pctRaw = () => (S.file ? Math.min(100, Math.floor(((NOW - S.fileAt) / o.processMs) * 100)) : 0);
   const pct = () => (o.stuckAt !== null ? Math.min(o.stuckAt, pctRaw()) : pctRaw());
   const uploaded = () => !!S.file && pct() >= 100;
@@ -61,13 +68,20 @@ function fakeStudio(opt = {}) {
       case "productsOption": case "linkNext": return S.dialog === "type";
       case "productSearch": case "productNext": return S.dialog === "search";
       case "productNoResults": return S.dialog === "search" && S.searched && !S.rows.length;
-      case "productNameInput": case "productAdd": return S.dialog === "name";
+      case "productNameInput": return S.dialog === "name" && !o.nameHidden;
+      case "productNameError": return S.dialog === "name" && o.nameError && INVALID.test(S.nameValue);
+      case "productAdd": return S.dialog === "name";
       case "dialog": return !!S.dialog;
       case "postButton": return !!S.file && !S.posted;
       case "posted": return S.posted;
+      case "privacyControl": return !!S.file && !S.posted && !S.dialog && o.privacyControl;
       default: return false;
     }
   };
+  // what the AI's snapshot sees (selectors or not)
+  const seen = (n) => (n === "productNameInput" ? S.dialog === "name" : n === "privacyControl" ? !!S.file && !S.posted && !S.dialog : n === "privacyOpt" ? S.privacyOpen : visible(n));
+  const NAMES = { attachLink: "Attach a shop link", privacyControl: () => S.privacy, privacyOpt: () => PRIVACY_LABEL[S.privacyWant || "everyone"] };
+  const nameOf = (n) => (typeof NAMES[n] === "function" ? NAMES[n]() : NAMES[n] || n);
   const disabled = (name) => {
     if (name === "linkNext") return !S.typeChosen;
     if (name === "productNext") return !S.selected;
@@ -75,7 +89,7 @@ function fakeStudio(opt = {}) {
     if (name === "postButton") return !uploaded() && !o.postOnWhileUploading;
     return false;
   };
-  const text = (name) => (name === "uploadProgress" ? `Uploading ${pct()}%` : name === "uploaded" ? "Uploaded (12.4MB)" : name === "productNoResults" ? "No products found" : name === "posted" ? "Your video has been posted. Everyone can see this." : name);
+  const text = (name) => (name === "uploadProgress" ? `Uploading ${pct()}%` : name === "uploaded" ? "Uploaded (12.4MB)" : name === "productNoResults" ? "No products found" : name === "posted" ? "Your video has been posted. Everyone can see this." : name === "productNameError" ? "Invalid characters. Remove them and try again." : nameOf(name));
   const doSearch = () => {
     S.searches.push(S.search);
     const words = S.search.toLowerCase().split(/\s+/).filter(Boolean);
@@ -104,10 +118,19 @@ function fakeStudio(opt = {}) {
     async goto() { NOW += 1500; S.page = "upload"; await tick(); return { ms: 1500, timedOut: false }; },
     async find(ways) {
       await tick();
+      // a privacy option (rules.js privacyOptionWays): there while the list is open
+      if (ways && ways[0] && ways[0].privacyOption) { if (!S.privacyOpen) return null; S.privacyWant = ways[0].privacyOption; return { ref: REF.privacyOpt, way: 0, disabled: false, text: PRIVACY_LABEL[S.privacyWant] }; }
+      // a learned target: found by its words, like page.js FIND `learned`
+      if (ways && ways[0] && ways[0].learned) {
+        const t = ways[0].learned;
+        const n = ORDER.find((x) => seen(x) && (t.privacy ? x === "privacyControl" : nameOf(x) === (t.text || t.label)) && !!t.dlg === (["productNameInput", "productAdd", "productNext", "productsOption", "linkNext", "productSearch"].includes(x)));
+        return n ? { ref: REF[n], way: 0, disabled: disabled(n), text: nameOf(n) } : null;
+      }
       const name = NAME_OF.get(ways);
       if (!name || !visible(name)) return null;
       return { ref: REF[name], way: 0, disabled: disabled(name), text: text(name) };
     },
+    async variant() { return { url: page.url(), dialog: S.dialog || "" }; },
     async rows(ways) {
       await tick();
       const name = NAME_OF.get(ways);
@@ -122,10 +145,17 @@ function fakeStudio(opt = {}) {
       if (name === "productSelected") return all.filter((r) => r.selected);
       return [];
     },
-    async textOf(ref) { settle(); if (ref === REF.captionBox) return S.caption; if (ref === REF.productNameInput) return S.nameValue; return ""; },
+    async textOf(ref) { settle(); if (ref === REF.captionBox) return S.caption; if (ref === REF.productNameInput) return S.nameValue; if (ref === REF.privacyControl) return S.privacy; return ""; },
     async snapshot() {
-      const els = ORDER.filter((n) => n !== "fileInput" && visible(n)).map((n) => ({ ref: REF[n], role: "button", name: n === "attachLink" ? "Attach a shop link" : n, tag: "button", x: 10, y: 10, w: 50, h: 20, ...(disabled(n) ? { disabled: true } : {}) }));
-      return { width: 1200, height: 800, url: page.url(), elements: els };
+      const inDlg = (n) => ["productNameInput", "productNameError", "productAdd", "productNext", "productsOption", "linkNext", "productSearch", "productNoResults"].includes(n);
+      const els = ORDER.filter((n) => n !== "fileInput" && n !== "dialog" && seen(n)).map((n) => ({
+        ref: REF[n], role: n === "productNameInput" ? "input" : n === "privacyOpt" ? "option" : "button", name: nameOf(n), tag: n === "productNameInput" ? "input" : "button", x: 10, y: 10, w: 50, h: 20,
+        ...(n === "productNameInput" ? { type: "text", value: S.nameValue } : { text: nameOf(n) }),
+        ...(n === "privacyControl" ? { near: "who can watch this video" } : n === "productNameInput" ? { near: "link name" } : {}),
+        ...(inDlg(n) ? { dlg: true } : {}),
+        ...(disabled(n) ? { disabled: true } : {}),
+      }));
+      return { width: 1200, height: 800, url: page.url(), elements: els, dialog: S.dialog || "", notices: visible("productNameError") ? ["Invalid characters. Remove them and try again."] : [] };
     },
     async screenshot() { return "x".repeat(2000); },
     async clickRef(ref) {
@@ -145,8 +175,13 @@ function fakeStudio(opt = {}) {
       else if (name === "productSearch") S.focused = "search";
       else if (name === "productNext") { if (S.selected) { S.dialog = "name"; S.nameValue = S.selected; } }
       else if (name === "productNameInput") S.focused = "name";
-      else if (name === "productAdd") { S.product = S.selected; S.dialog = null; S.events.push(`product ${S.product}`); }
-      else if (name === "postButton") { if (!disabled("postButton")) { S.posted = true; S.postedAt = NOW; S.events.push("posted"); } }
+      else if (name === "productAdd") {
+        if (INVALID.test(S.nameValue)) { S.addRefused++; S.events.push("add refused"); } // TikTok won't take the name
+        else { S.product = S.selected; S.productName = S.nameValue; S.dialog = null; S.events.push(`product ${S.product}`); }
+      }
+      else if (name === "postButton") { if (!disabled("postButton")) { S.posted = true; S.postedAt = NOW; S.privacyAtPost = S.privacy; S.events.push("posted"); } }
+      else if (name === "privacyControl") { S.privacyOpen = true; S.events.push("privacy list"); }
+      else if (name === "privacyOpt") { S.privacy = PRIVACY_LABEL[S.privacyWant || "everyone"]; S.privacyOpen = false; S.events.push(`privacy ${S.privacy}`); }
       await page.pause("afterClick");
     },
     async clickAt() { await page.pause("afterClick"); },
@@ -174,7 +209,8 @@ function fakeStudio(opt = {}) {
 
 // Groot (the platform's AI fallback), scripted per test.
 function fakeGroot(answer = () => ({ action: "need_user", reason: "other", message: "no answer" })) {
-  const g = { calls: [], async nextAction(body) { g.calls.push({ step: body.step, at: NOW, elements: body.view.elements.length }); const a = await answer(body, g.calls.length); return a && a.ok === false ? a : { ok: true, action: a }; } };
+  // an answer with `actions` is a plan (the platform sends the first as `action` too, for old engines)
+  const g = { calls: [], async nextAction(body) { g.calls.push({ step: body.step, at: NOW, elements: body.view.elements.length }); const a = await answer(body, g.calls.length); return a && a.ok === false ? a : a && a.actions ? { ok: true, action: a.actions[0], actions: a.actions } : { ok: true, action: a }; } };
   return g;
 }
 
@@ -492,6 +528,184 @@ test("Manual: filled in, waits for the upload, hands over, never posts", async (
   assert.strictEqual(page.S.posted, false);
   assert.strictEqual(page.S.caption, FULL);
   assert.strictEqual(page.S.product, "Comfort Weekend Slipper");
+});
+
+// ---- v1.2.4 (2026-10-06): who can watch, the product name, the smarter fallback, learning ----------
+
+// A platform that remembers fixes the way src/lib/groot-learn*.ts does (trusted until 2 misses in a row).
+function fakeLearning(seed = []) {
+  const L = { rows: seed.map((r, i) => ({ id: `L${i + 1}`, scope: "creator", wins: 1, losses: 0, streak: 0, variant: "", ...r })), solved: [], used: [], asked: 0 };
+  return {
+    L,
+    async learned() { L.asked++; return { ok: true, targets: L.rows.filter((r) => r.streak < 2).map(({ streak, ...r }) => r) }; },
+    async learn(body) {
+      if (body.solved) { L.solved.push(body.solved); L.rows.push({ id: `L${L.rows.length + 1}`, scope: "creator", wins: 1, losses: 0, streak: 0, ...body.solved }); }
+      for (const u of body.used || []) { L.used.push(u); const r = L.rows.find((x) => x.id === u.id); if (r) { if (u.ok) { r.wins++; r.streak = 0; } else { r.losses++; r.streak++; } } }
+      return { ok: true };
+    },
+  };
+}
+const withLearning = (g, l) => Object.assign(g, { learned: l.learned, learn: l.learn });
+const settleLearn = async () => { for (let i = 0; i < 5; i++) await tick(); };
+
+test("who can watch: TikTok remembered 'Only you' → set to Everyone and read back before Post, no AI", async () => {
+  const { r, S, groot } = await run({ privacy: "Only you" });
+  assert.strictEqual(r.status, "posted", JSON.stringify(r));
+  assert.strictEqual(S.privacyAtPost, "Everyone", "posted as Everyone");
+  assert.strictEqual(groot.calls.length, 0);
+  const st = r.steps.find((s) => s.step === "privacy");
+  assert(/was "Only you": setting Everyone/.test(st.how) && /Everyone \(read back\)/.test(st.how), st.how);
+  const i = r.steps.findIndex((s) => s.step === "privacy");
+  assert.strictEqual(r.steps[i + 1].step, "post", "right before Post");
+});
+
+test("who can watch: already Everyone → nothing touched", async () => {
+  const { r, S } = await run({});
+  assert.strictEqual(r.status, "posted");
+  assert(!S.events.includes("privacy list"), "the setting was never opened");
+  assert(/already Everyone/.test(r.steps.find((s) => s.step === "privacy").how));
+});
+
+test("who can watch: the creator chose Friends in GoViral → Friends (respected, not Everyone)", async () => {
+  const { r, S } = await run({ privacy: "Everyone" }, { job: { privacy: "friends" } });
+  assert.strictEqual(r.status, "posted");
+  assert.strictEqual(S.privacyAtPost, "Friends");
+});
+
+test("who can watch, Manual: set before the handoff, never posted", async () => {
+  const page = fakeStudio({ privacy: "Only you" });
+  const engine = createEngine({ page, groot: fakeGroot(), report: () => {}, timeouts: { handoff: 3000 }, log: () => {} });
+  const r = await engine.run({ ...JOB, mode: "manual" });
+  assert.strictEqual(r.status, "ready");
+  assert.strictEqual(page.S.privacy, "Everyone");
+  assert.strictEqual(page.S.posted, false);
+});
+
+test("who can watch, the selectors miss it: Groot sets it (a plan: open, then the option), the check reads it back", async () => {
+  const groot = fakeGroot((b) => {
+    if (b.step !== "privacy") return { action: "need_user", reason: "other", message: "?" };
+    assert.strictEqual(b.privacy, "everyone", "the goal's privacy is sent");
+    assert(b.tried.some((t) => /privacyControl not found/.test(t)), "what the script tried goes up");
+    const opt = b.view.elements.find((e) => e.role === "option" && /everyone/i.test(e.name));
+    if (opt) return { action: "click", ref: opt.ref };
+    const ctl = b.view.elements.find((e) => /who can watch/.test(e.near || ""));
+    return { action: "click", ref: ctl.ref };
+  });
+  const { r, S, groot: g } = await run({ privacy: "Only you", privacyControl: false }, { groot });
+  assert.strictEqual(r.status, "posted", JSON.stringify(r));
+  assert.strictEqual(S.privacyAtPost, "Everyone");
+  assert.strictEqual(g.calls.filter((c) => c.step === "privacy").length, 2);
+});
+
+test("product name: TikTok refuses Add over a '|' with no message Groot knows → only the rejected characters come out, Added, no AI", async () => {
+  const want = "Comfrt | Weekend Slipper | Faux Suede";
+  const { r, S, groot, events } = await run({ showcase: [want], nameError: false }, { job: { product: "comfrt weekend slipper" } });
+  assert.strictEqual(r.status, "posted", JSON.stringify(r));
+  assert.strictEqual(S.productName, "Comfrt Weekend Slipper Faux Suede", "the rest of TikTok's title kept");
+  assert(S.addRefused >= 1, "TikTok refused it first");
+  assert.strictEqual(groot.calls.length, 0);
+  assert(!events.some((e) => e.status === "needs_you"));
+  assert(/TikTok refused Add/.test(r.steps.find((s) => s.step === "product_add").how));
+});
+
+test("product name: the field no selector finds → Groot types the CLEANED name (cleared first) and presses Add in one plan; learned", async () => {
+  const want = "Comfrt | Weekend Slipper | Faux Suede";
+  const l = fakeLearning();
+  const groot = withLearning(fakeGroot((b) => {
+    if (b.step !== "product_add") return { action: "need_user", reason: "other", message: "?" };
+    const f = b.view.elements.find((e) => e.dlg && e.value);
+    const add = b.view.elements.find((e) => e.name === "productAdd");
+    return { actions: [{ action: "type", ref: f.ref, text: "Comfrt Weekend Slipper Faux Suede", clear: true }, { action: "click", ref: add.ref }] };
+  }), l);
+  const { r, S, events } = await run({ showcase: [want], nameError: false, nameHidden: true }, { job: { product: "comfrt weekend slipper" }, groot });
+  await settleLearn();
+  assert.strictEqual(r.status, "posted", JSON.stringify(r));
+  assert.strictEqual(S.productName, "Comfrt Weekend Slipper Faux Suede");
+  assert(!events.some((e) => e.status === "needs_you"), "no needs-you");
+  assert.strictEqual(groot.calls.filter((c) => c.step === "product_add").length, 1, "one look, a two-action plan");
+  const fix = l.L.solved.find((s) => s.step === "product_add");
+  assert(fix, "the fix was saved");
+  assert.deepStrictEqual(fix.recipe.map((a) => a.do + (a.value ? `:${a.value}` : "")), ["type:clean_name", "click"]);
+  assert(!JSON.stringify(fix).includes("Comfrt"), "nothing of the product in the saved fix");
+});
+
+test("product name: Groot may NOT type a name of its own (only the cleaned one)", async () => {
+  const want = "Comfrt | Weekend Slipper | Faux Suede";
+  const groot = fakeGroot((b) => {
+    if (b.step !== "product_add") return { action: "need_user", reason: "other", message: "?" };
+    const f = b.view.elements.find((e) => e.dlg && e.value);
+    return { action: "type", ref: f.ref, text: "Best Slippers Ever" };
+  });
+  const page = fakeStudio({ showcase: [want], nameError: false, nameHidden: true });
+  const events = [];
+  const engine = createEngine({ page, groot, report: (e) => { events.push(e); if (e.status === "needs_you") setImmediate(() => { page.S.dialog = null; page.S.product = want; }); }, log: () => {} });
+  const r = await engine.run({ ...JOB, product: "comfrt weekend slipper" });
+  assert(!page.S.nameValue.includes("Best"), "never typed");
+  assert(events.some((e) => e.status === "needs_you" && e.step === "product_add"));
+  assert.strictEqual(r.status, "posted");
+});
+
+test("learning: a fix the AI found on one post is tried FIRST on the next, with no AI", async () => {
+  const l = fakeLearning();
+  const answer = (b) => {
+    if (b.step !== "product_open") return { action: "need_user", reason: "other", message: "?" };
+    const el = b.view.elements.find((e) => /attach a shop link/i.test(e.name));
+    return el ? { action: "click", ref: el.ref } : { action: "need_user", reason: "other", message: "no link button" };
+  };
+  const g1 = withLearning(fakeGroot(answer), l);
+  const first = await run({ addLink: false }, { groot: g1 });
+  await settleLearn();
+  assert.strictEqual(first.r.status, "posted");
+  assert.strictEqual(g1.calls.length, 1);
+  assert.strictEqual(first.r.learnedSaved, 1);
+  assert.deepStrictEqual(l.L.solved[0].recipe, [{ do: "click", target: { role: "button", tag: "button", text: "Attach a shop link" } }]);
+  const g2 = withLearning(fakeGroot(answer), l);
+  const second = await run({ addLink: false }, { groot: g2 });
+  await settleLearn();
+  assert.strictEqual(second.r.status, "posted", JSON.stringify(second.r));
+  assert.strictEqual(g2.calls.length, 0, "no AI the second time");
+  assert.strictEqual(second.r.learnedUsed, 1);
+  assert.deepStrictEqual(l.L.used, [{ id: "L1", ok: true }]);
+  assert(/learned fix worked/.test(second.r.steps.find((s) => s.step === "product_open").how));
+});
+
+test("learning: a learned fix that misses is reported and demoted (served no more after 2 misses), the post still goes", async () => {
+  const l = fakeLearning([{ step: "product_open", recipe: [{ do: "click", target: { role: "button", tag: "button", text: "Old shop link button" } }] }]);
+  for (let i = 0; i < 3; i++) {
+    const g = withLearning(fakeGroot(), l);
+    const { r } = await run({}, { groot: g });
+    await settleLearn();
+    assert.strictEqual(r.status, "posted", JSON.stringify(r));
+  }
+  assert.deepStrictEqual(l.L.used, [{ id: "L1", ok: false }, { id: "L1", ok: false }], "tried twice, then no longer served");
+  assert.strictEqual(l.L.rows[0].losses, 2);
+});
+
+test("learning: nothing from the platform (old platform, or no answer) never slows a post", async () => {
+  const g = fakeGroot();
+  g.learned = () => new Promise(() => {}); // never answers
+  const t = realNow();
+  const page = fakeStudio({});
+  const engine = createEngine({ page, groot: g, report: () => {}, log: () => {} });
+  const r = await engine.run(JOB);
+  assert.strictEqual(r.status, "posted");
+  assert(realNow() - t < 8000, "the 5 s cap");
+});
+
+test("the AI's context: what the script tried, then each action with what happened after it", async () => {
+  const bodies = [];
+  const groot = fakeGroot((b, n) => {
+    bodies.push(JSON.parse(JSON.stringify({ tried: b.tried, history: b.history, plan: b.plan })));
+    if (b.step !== "product_open") return { action: "need_user", reason: "other", message: "?" };
+    if (n === 1) return { action: "scroll", dy: 300 };
+    const el = b.view.elements.find((e) => /attach a shop link/i.test(e.name));
+    return { action: "click", ref: el.ref };
+  });
+  const { r } = await run({ addLink: false }, { groot });
+  assert.strictEqual(r.status, "posted");
+  assert(bodies[0].tried.some((t) => /addLink not found/.test(t)), JSON.stringify(bodies[0]));
+  assert.strictEqual(bodies[0].plan, true);
+  assert(/^scrolled 300 → no dialog is open, the step isn't done yet$/.test(bodies[1].history[0]), bodies[1].history[0]);
 });
 
 (async () => {

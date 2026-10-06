@@ -31,6 +31,12 @@
 //  19 TikTok puts the file name back when the upload finishes: the description is written again
 //  20 the showcase shows products, none clearly the creator's: needs you with the list; the creator
 //     picks one in the window; Groot carries on and posts it
+//  21 who can watch: TikTok remembered "Only you" → Everyone, read back (Auto and Manual); 21b the
+//     creator's own choice ("Only me") is respected
+//  22 a name field the old selectors miss, a "|" in TikTok's title, a refusal in words Groot doesn't
+//     know: only the "|" comes out, Added, no needs-you, no AI
+//  23 learning: the AI's fixes on the first post are tried first on the second: no AI at all
+// The platform's learned fixes (/api/groot-post/learned, /learn) are played by the local server too.
 "use strict";
 
 const http = require("http");
@@ -66,6 +72,22 @@ function fakeMp4(seconds, fill = 7) {
 
 // ---- the local server ----------------------------------------------------------------------------
 const aiCalls = [];
+// The platform's learned fixes (src/lib/groot-learn*.ts there), in memory: a fix is served until it
+// misses twice in a row. Emptied before every scenario so one scenario's fixes never leak into another.
+const learnStore = [];
+function learned() { return { ok: true, targets: learnStore.filter((r) => r.streak < 2).map(({ streak, ...r }) => r) }; }
+function learn(b) {
+  if (b.solved && b.solved.step && Array.isArray(b.solved.recipe)) {
+    const sig = JSON.stringify([b.solved.step, b.solved.variant, b.solved.recipe]);
+    const had = learnStore.find((r) => r.sig === sig);
+    if (had) { had.wins++; had.streak = 0; } else learnStore.push({ id: `L${learnStore.length + 1}`, scope: "creator", step: b.solved.step, variant: b.solved.variant || "", recipe: b.solved.recipe, wins: 1, losses: 0, streak: 0, sig });
+  }
+  for (const u of Array.isArray(b.used) ? b.used : []) {
+    const r = learnStore.find((x) => x.id === u.id);
+    if (r) { if (u.ok) { r.wins++; r.streak = 0; } else { r.losses++; r.streak++; } }
+  }
+  return { ok: true };
+}
 const drive = { challenge: null, code: null, finished: 0, accessCalls: 0, files: { "DrvComfort_0123456789": "Comfort slipper drive take.mp4" } };
 function mockGroot(body) {
   const els = (body.view && body.view.elements) || [];
@@ -103,6 +125,8 @@ function startServer() {
       body.__cookie = req.headers.cookie || "";
       return json(200, { ok: true, action: mockGroot(body), left: 29 });
     }
+    if (u.pathname === "/api/groot-post/learned" && req.method === "POST") { await readJson(req); return json(200, learned()); }
+    if (u.pathname === "/api/groot-post/learn" && req.method === "POST") return json(200, learn(await readJson(req)));
     // ---- the platform's Drive routes (src/app/api/drive/* there) ----
     if (u.pathname === "/api/drive/connect" && req.method === "POST") {
       const b = await readJson(req);
@@ -163,6 +187,7 @@ let failures = 0;
 async function scenario(name, fn) {
   if (process.env.ONLY && !process.env.ONLY.split(",").some((o) => name.startsWith(o + " "))) return; // ONLY=10,18b runs just those
   const t0 = Date.now();
+  learnStore.length = 0;
   try { await fn(); console.log(`  ok   ${name} (${((Date.now() - t0) / 1000).toFixed(1)} s)`); }
   catch (e) { failures++; console.log(`  FAIL ${name}\n       ${e && e.stack ? e.stack.split("\n").slice(0, 3).join("\n       ") : e}`); }
 }
@@ -493,7 +518,7 @@ app.whenReady().then(async () => {
     assert(m.captionTypedPct !== null && m.captionTypedPct < 100, `typed at ${m.captionTypedPct}%`);
     assert.strictEqual(m.caption, "the comfort weekend slipper for lazy days at home #slippers #comfort #weekendvibes #cozyathome");
     assert.strictEqual(m.product, "Comfort Weekend Slipper");
-    assert(Array.isArray(r.steps) && r.steps.length === 13 && r.steps.every((s) => s.ok), JSON.stringify(r.steps));
+    assert(Array.isArray(r.steps) && r.steps.length === 14 && r.steps.every((s) => s.ok), JSON.stringify(r.steps));
     console.log(`       steps: ${r.steps.map((s) => `${s.step} ${(s.ms / 1000).toFixed(1)}`).join(", ")}`);
     p.close();
   });
@@ -542,6 +567,74 @@ app.whenReady().then(async () => {
     const r = await run;
     assert.strictEqual(r.status, "posted", JSON.stringify(r));
     assert.strictEqual((await mockState(p)).product, "Cloud Comfort Slides");
+    p.close();
+  });
+
+  await scenario("21 who can watch: TikTok remembered 'Only you' → set to Everyone and read back (Auto, then Manual)", async () => {
+    const p = makePoster("?privacy=only");
+    const r = await p.post(job({ postId: "priv1" }));
+    assert.strictEqual(r.status, "posted", JSON.stringify(r));
+    const m = await mockState(p);
+    assert.strictEqual(m.privacy, "Everyone", "posted for everyone");
+    assert(m.events.includes("privacy Everyone"));
+    assert(/Everyone \(read back\)/.test(r.steps.find((s) => s.step === "privacy").how));
+    await shot(p, "engine-21-privacy-everyone");
+    p.close();
+    const p2 = makePoster("?privacy=only");
+    const events = [];
+    const run = p2.post(job({ postId: "priv2", mode: "manual" }), (e) => events.push(e));
+    assert(await waitUntil(() => events.some((e) => e.status === "ready")), "never handed over");
+    assert.strictEqual(await inMock(p2, `document.getElementById("privacyBtn").textContent.trim()`), "Everyone", "set before the handoff");
+    assert.strictEqual((await mockState(p2)).posted, false);
+    electron.ipcMain.emit("gvd:tiktok-bar:next", { sender: p2.window().barContents });
+    assert.strictEqual((await run).status, "ready");
+    p2.close();
+  });
+
+  await scenario("21b who can watch: the creator chose 'Only me' in GoViral → respected", async () => {
+    const p = makePoster();
+    const r = await p.post(job({ postId: "priv3", privacy: "only_me" }));
+    assert.strictEqual(r.status, "posted", JSON.stringify(r));
+    assert.strictEqual((await mockState(p)).privacy, "Only you");
+    p.close();
+  });
+
+  await scenario("22 a name field the old selectors miss, '|' in TikTok's title, a refusal in words Groot doesn't know → only the '|' comes out, Added, no needs-you", async () => {
+    const p = makePoster("?name=hidden");
+    const before = aiCalls.length;
+    const events = [];
+    const r = await p.post(job({ postId: "hid1", product: "comfrt weekend slipper faux suede", caption: "comfort weekend slipper", hashtags: ["slippers"] }), (e) => events.push(e));
+    assert.strictEqual(r.status, "posted", JSON.stringify(r));
+    const m = await mockState(p);
+    assert.strictEqual(m.product, "Comfrt | Weekend Slipper | Faux Suede");
+    assert.strictEqual(m.productName, "Comfrt Weekend Slipper Faux Suede", "the rest of TikTok's title kept");
+    assert(m.nameErrors >= 1, "TikTok refused it first");
+    assert(!events.some((e) => e.status === "needs_you"), "no needs-you");
+    assert.strictEqual(aiCalls.length - before, 0, "no AI needed");
+    console.log(`       product_add: ${r.steps.find((s) => s.step === "product_add").how}`);
+    await shot(p, "engine-22-hidden-name-added");
+    p.close();
+  });
+
+  await scenario("23 learning: the AI's fix on the first post is used on the second, with no AI", async () => {
+    const p = makePoster("?v=changed");
+    const before = aiCalls.length;
+    const r1 = await p.post(job({ postId: "learn1" }));
+    assert.strictEqual(r1.status, "posted", JSON.stringify(r1));
+    const first = aiCalls.slice(before).map((c) => c.step);
+    assert(first.includes("product_open") && first.includes("post"), first.join(","));
+    assert(await waitUntil(() => learnStore.some((x) => x.step === "product_open") && learnStore.some((x) => x.step === "post"), 5000), JSON.stringify(learnStore));
+    const mid = aiCalls.length;
+    const r2 = await p.post(job({ postId: "learn2" }));
+    assert.strictEqual(r2.status, "posted", JSON.stringify(r2));
+    assert.strictEqual(aiCalls.length - mid, 0, `no AI the second time (asked for ${aiCalls.slice(mid).map((c) => c.step).join(",")})`);
+    assert.strictEqual(r2.learnedUsed, 2);
+    assert(/learned fix worked/.test(r2.steps.find((s) => s.step === "product_open").how));
+    assert(await waitUntil(() => learnStore.find((x) => x.step === "product_open").wins >= 2, 5000), "the win was reported");
+    const m = await mockState(p);
+    assert.strictEqual(m.posted, true);
+    assert.strictEqual(m.product, "Hydro Flask 40 oz Tumbler");
+    console.log(`       learned: ${learnStore.map((x) => `${x.step} ${JSON.stringify(x.recipe.map((a) => a.target && (a.target.text || a.target.label)))} wins ${x.wins}`).join(" | ")}`);
     p.close();
   });
 

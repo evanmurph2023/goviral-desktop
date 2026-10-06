@@ -24,6 +24,10 @@
     ?slow=N      the upload takes N ticks of 300 ms instead of 4 (the form is usable meanwhile)
     ?eat=1       the hashtag list EATS a typed space while it is open (only Escape closes it safely)
     ?prefill=1   when the upload finishes, TikTok puts the file name back in the description
+    ?privacy=only  "Who can watch this video" (a dropdown like TikTok's) shows "Only you": TikTok
+                 remembered the account's last choice (Drew's post, 2026-10-05)
+    ?name=hidden the name step the old selectors miss, the title with a "|", and Add that only
+                 refuses (a toast in words Groot doesn't know, outside the box)
   Everything that happens is recorded in window.__mock for the harness to read.
 -->
 <style>
@@ -53,6 +57,9 @@
   [role=option], [role=radio] { padding: 10px; border: 1px solid #eee; border-radius: 6px; margin: 6px 0; cursor: pointer; }
   [aria-checked=true], [aria-selected=true] { border-color: #fe2c55; background: #fff0f3; }
   .err { color: #e11d48; font-size: 13px; margin-top: 6px; }
+  .vis { margin-top: 14px; } .f-label { font-weight: 600; } .sel { position: relative; width: 320px; margin-top: 6px; }
+  .sel button { width: 100%; text-align: left; } #privacyList { position: absolute; top: 40px; left: 0; right: 0; background: #fff; border: 1px solid #ddd; border-radius: 8px; z-index: 5; } #privacyList [role=option] { margin: 4px; }
+  .toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); background: #161823; color: #fff; padding: 10px 16px; border-radius: 8px; z-index: 20; }
   .captcha_verify_container { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 20px; z-index: 10; }
   .chip { display: inline-block; margin: 10px 0; padding: 6px 10px; border-radius: 6px; background: #f1f1f2; }
   .row { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
@@ -102,7 +109,9 @@
     <div id="linkSlot"></div>
     <label class="f">Playlist <select id="playlist"><option value="">Select a playlist</option><option value="faves">Faves</option></select></label>
     <label class="f">Location <input id="location" placeholder="Search locations"></label>
-    <label class="f">Who can watch this video <select id="privacy"><option>Everyone</option><option>Friends</option><option>Only you</option></select></label>
+    <div class="f vis"><div class="f-label">Who can watch this video</div>
+      <div class="sel"><button type="button" role="combobox" aria-haspopup="listbox" aria-expanded="false" id="privacyBtn">Everyone</button>
+        <div role="listbox" id="privacyList" hidden><div role="option">Everyone</div><div role="option">Friends</div><div role="option">Only you</div></div></div></div>
     <div class="row" id="postSlot"></div>
   </section>
 
@@ -132,6 +141,13 @@
     <div class="err" id="perr" hidden>Invalid characters. Remove them and try again.</div>
     <div class="row"><button id="addBtn">Add</button></div>
   </div>
+  <!-- ?name=hidden: the name step the old selectors miss (no name, no placeholder, no maxlength, its
+       own words) and TikTok saying nothing Groot knows: Add stays on and only refuses -->
+  <div id="step3h" hidden>
+    <h3>Link details</h3>
+    <div class="TUXTextInput"><div class="lbl">Display text</div><input type="text" class="TUXTextInputCore-input" id="pname2" autocomplete="off"></div>
+    <div class="row"><button id="addBtn2">Add</button></div>
+  </div>
 </div>
 
 <div role="dialog" id="confirm" hidden aria-label="Post now?">
@@ -151,9 +167,14 @@
   // search that matches ANY word, so "comfrt weekend slippers" lists every "weekend" product and
   // his slipper sits on page 3.
   const BIG = q.get("showcase") === "big";
+  const HIDDEN_NAME = q.get("name") === "hidden";
   const PRODUCTS = BIG
     ? [...Array.from({ length: 11 }, (_, i) => `Weekend Duffel Bag No. ${i + 1} Canvas`), "Cloud Comfort Slides", "Comfrt | Weekend Slipper | Faux Suede Slip-On With Sherpa-Lin", ...Array.from({ length: 20 }, (_, i) => `Kitchen Thing ${i + 1}`)]
-    : ["Comfort Weekend Slipper", "Cloud Comfort Slides", "Hydro Flask 40 oz Tumbler", "Stanley Quencher H2.0 40 oz", "Glow Serum ✨ Vitamin C ★ 30ml"];
+    : ["Comfort Weekend Slipper", "Cloud Comfort Slides", "Hydro Flask 40 oz Tumbler", "Stanley Quencher H2.0 40 oz", "Glow Serum ✨ Vitamin C ★ 30ml", ...(HIDDEN_NAME ? ["Comfrt | Weekend Slipper | Faux Suede"] : [])];
+  // ?privacy=only: TikTok remembered the account's last choice, "Only you" (Drew's post, 2026-10-05)
+  if (q.get("privacy") === "only") $("privacyBtn").textContent = "Only you";
+  $("privacyBtn").onclick = () => { const l = $("privacyList"); l.hidden = !l.hidden; $("privacyBtn").setAttribute("aria-expanded", String(!l.hidden)); ev("privacy list"); };
+  for (const o of $("privacyList").children) o.onclick = () => { $("privacyBtn").textContent = o.textContent; $("privacyList").hidden = true; $("privacyBtn").setAttribute("aria-expanded", "false"); ev("privacy " + o.textContent); };
   let pageNo = 1, lastHits = [];
   const INVALID = /[^\p{L}\p{N} '&.,-]/u;
   let dirty = false;
@@ -246,7 +267,7 @@
   function enablePost() { if (changed) post.removeAttribute("aria-disabled"); else post.disabled = false; }
   function publish() {
     M.caption = $("caption").innerText.replace(/\s+/g, " ").trim();
-    M.playlist = $("playlist").value; M.location = $("location").value; M.privacy = $("privacy").value;
+    M.playlist = $("playlist").value; M.location = $("location").value; M.privacy = $("privacyBtn").textContent.trim();
     M.posted = true; ev("posted");
     $("form").hidden = true; $("done").hidden = false;
   }
@@ -262,7 +283,7 @@
 
   // the product dialog: Products → Next → search → select → Next → name → Add
   let type = null, picked = null;
-  function resetDialog() { type = null; picked = null; $("step1").hidden = false; $("step2").hidden = true; $("step3").hidden = true; $("next1").disabled = true; $("next2").disabled = true; $("search").value = ""; $("rows").innerHTML = ""; for (const o of [$("optProducts"), $("optOther")]) o.removeAttribute("aria-selected"); }
+  function resetDialog() { type = null; picked = null; $("step1").hidden = false; $("step2").hidden = true; $("step3").hidden = true; $("step3h").hidden = true; $("next1").disabled = true; $("next2").disabled = true; $("search").value = ""; $("rows").innerHTML = ""; for (const o of [$("optProducts"), $("optOther")]) o.removeAttribute("aria-selected"); }
   $("cancel1").onclick = () => { $("dlg").hidden = true; };
   $("optProducts").onclick = () => { type = "products"; $("optProducts").setAttribute("aria-selected", "true"); $("optOther").removeAttribute("aria-selected"); $("next1").disabled = false; };
   $("optOther").onclick = () => { type = "other"; $("optOther").setAttribute("aria-selected", "true"); $("optProducts").removeAttribute("aria-selected"); $("next1").disabled = false; };
@@ -309,12 +330,25 @@
   $("search").addEventListener("input", () => renderRows($("search").value));
   $("search").addEventListener("keydown", (e) => { if (e.key === "Enter") { M.searches.push($("search").value); renderRows($("search").value); } });
   function checkName() { const bad = INVALID.test($("pname").value); $("perr").hidden = !bad; $("addBtn").disabled = bad; if (bad) M.nameErrors++; return !bad; }
-  $("next2").onclick = () => { if (!picked) return; $("step2").hidden = true; $("step3").hidden = false; $("pname").value = picked; checkName(); };
+  $("next2").onclick = () => {
+    if (!picked) return;
+    $("step2").hidden = true;
+    if (HIDDEN_NAME) { $("step3h").hidden = false; $("pname2").value = picked; return; }
+    $("step3").hidden = false; $("pname").value = picked; checkName();
+  };
   $("pname").addEventListener("input", checkName);
-  $("addBtn").onclick = () => {
-    if (!checkName()) return;
-    M.product = picked; M.productName = $("pname").value;
-    $("dlg").hidden = true; $("productChip").innerHTML = `<span class="chip">Product: ${M.productName}</span>`; ev("product " + picked);
+  function added(name) { M.product = picked; M.productName = name; $("dlg").hidden = true; $("productChip").innerHTML = `<span class="chip">Product: ${M.productName}</span>`; ev("product " + picked); }
+  $("addBtn").onclick = () => { if (!checkName()) return; added($("pname").value); };
+  // the hidden-name variant: Add is always on; a rejected name only gets a toast OUTSIDE the box,
+  // in words Groot doesn't know, and the box stays open
+  $("addBtn2").onclick = () => {
+    if (INVALID.test($("pname2").value)) {
+      M.nameErrors++; ev("add refused");
+      const t = document.createElement("div"); t.className = "toast"; t.textContent = "Couldn't add the link. Check it and try again."; document.body.appendChild(t);
+      setTimeout(() => t.remove(), 1500);
+      return;
+    }
+    added($("pname2").value);
   };
 </script>
 </body>
