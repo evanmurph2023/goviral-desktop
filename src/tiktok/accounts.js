@@ -77,6 +77,23 @@ function createAccounts({ electron, userData, windowOf = () => null, partitions 
     } catch (e) { log("tiktok status", e && e.message); return { signedIn: false }; }
   }
 
+  // Link the cloud poster with the TikTok this window is signed in to (2026-10-06): TikTok refuses
+  // the QR code from GoViral's servers, so the session the creator already has HERE (their own
+  // computer, their own sign-in) is handed over instead: TikTok's cookies on tiktok.com and this
+  // window's user agent, nothing else (the platform filters again). Never a password. Null when
+  // TikTok isn't signed in here.
+  async function tiktokSession(userAgent) {
+    const ses = electron.session.fromPartition(partitions.tiktok);
+    const t = now() / 1000;
+    const all = await ses.cookies.get({});
+    const cookies = all
+      .filter((c) => c && c.value && /(^|\.)tiktok\.com$/.test(String(c.domain || "").replace(/^\./, "")) && (!c.expirationDate || c.expirationDate > t))
+      .map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path || "/", expires: c.session || !c.expirationDate ? -1 : Math.floor(c.expirationDate), httpOnly: !!c.httpOnly, secure: !!c.secure, sameSite: c.sameSite === "strict" ? "Strict" : c.sameSite === "no_restriction" ? "None" : "Lax" }));
+    if (!cookies.some((c) => /^sessionid(_ss)?$/.test(c.name))) return null;
+    const ua = String(userAgent || ses.getUserAgent() || "").replace(/\s(?:GoViralDesktop|Electron|goviral-desktop)\/\S+/g, "");
+    return { cookies, userAgent: ua };
+  }
+
   async function trybeStatus() {
     let got = null;
     // 1. the Trybe window, when it is open on Trybe
@@ -101,6 +118,7 @@ function createAccounts({ electron, userData, windowOf = () => null, partitions 
 
   return {
     tiktokStatus,
+    tiktokSession,
     trybeStatus,
     // After a read: the brands for quick replies, the TikTok handle from the posts' addresses.
     remember(read, result) {

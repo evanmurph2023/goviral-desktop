@@ -515,6 +515,30 @@ test("Trybe signed in or not, from the Trybe window's Local Storage files (never
   assert.strictEqual(AC.trybeSessionFromStorage([Buffer.from(`_https://evil.example\x00\x01sb-sup-auth-token`, "latin1")]), null);
 });
 
+pending.push((async () => {
+  // Cloud posting hand-over (2026-10-06): TikTok's cookies on tiktok.com + a plain Chrome user agent, nothing else.
+  const now = Date.UTC(2026, 9, 6);
+  const jar = [
+    { name: "sessionid", value: "s1", domain: ".tiktok.com", path: "/", expirationDate: now / 1000 + 9999, httpOnly: true, secure: true, sameSite: "no_restriction" },
+    { name: "ttwid", value: "t1", domain: ".tiktok.com", path: "/", session: true, httpOnly: true, secure: true, sameSite: "no_restriction" },
+    { name: "old", value: "x", domain: ".tiktok.com", path: "/", expirationDate: now / 1000 - 5 },
+    { name: "sb-x", value: "trybe", domain: "jointrybe.com", path: "/" },
+    { name: "sessionid", value: "evil", domain: "tiktok.com.evil.example", path: "/" },
+  ];
+  let cookies = jar;
+  const electron = { session: { fromPartition: () => ({ cookies: { get: async () => cookies }, getUserAgent: () => "x" }) } };
+  const acc = AC.createAccounts({ electron, userData: require("os").tmpdir(), now: () => now });
+  const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+  const s = await acc.tiktokSession(`${ua} GoViralDesktop/1.2.4`);
+  assert.deepStrictEqual(s.cookies.map((c) => c.name), ["sessionid", "ttwid"]);
+  assert.strictEqual(s.cookies[0].sameSite, "None");
+  assert.strictEqual(s.cookies[1].expires, -1);
+  assert.strictEqual(s.userAgent, ua, "no app name in the user agent");
+  cookies = jar.filter((c) => c.name !== "sessionid");
+  assert.strictEqual(await acc.tiktokSession(ua), null, "not signed in: nothing to hand over");
+  console.log("  ok   the cloud hand-over: TikTok's cookies and a Chrome user agent only");
+})());
+
 Promise.all(pending.map((p) => p.catch((e) => { failures++; console.log(`  FAIL (async) ${e && e.message}`); }))).then(() => {
   console.log(failures ? `\n${failures} failed` : "\nall passed");
   process.exit(failures ? 1 : 0);

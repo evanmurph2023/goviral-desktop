@@ -112,6 +112,20 @@ function setUpTikTok({ electron, appOrigin, log, icon, overrides = {} }) {
   const accounts = createAccounts({ electron, userData: o.userData || app.getPath("userData"), windowOf: (k) => poster.window(k), trybeOrigin: (dev && o.trybeUrl) || trybeUrl, log });
   handle("gvd:tiktok:status", () => accounts.tiktokStatus(), { signedIn: false });
   handle("gvd:trybe:status", () => accounts.trybeStatus(), { signedIn: false });
+  // Cloud posting: hand the cloud poster the TikTok this app is signed in to (TikTok refuses the QR
+  // from GoViral's servers). The main process sends it straight to the platform with the app's own
+  // sign-in cookie; the page only gets the login's id, to poll (GET /api/groot-cloud/connect?id=).
+  handle("gvd:tiktok:linkCloud", async () => {
+    const session = await accounts.tiktokSession(app.userAgentFallback);
+    if (!session) return { ok: false, error: "Sign in to TikTok here first: tap Open TikTok, sign in, then link it.", code: "signed_out" };
+    let timezone = null;
+    try { timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { timezone = null; }
+    const res = await platformFetch(`${appOrigin}/api/groot-cloud/connect`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform: "tiktok", session, timezone }) });
+    const j = await res.json().catch(() => null);
+    log("tiktok link cloud", res.status, j && j.ok ? "handed over" : (j && j.code) || "failed");
+    if (!res.ok || !j || !j.ok || typeof j.id !== "string") return { ok: false, error: (j && typeof j.error === "string" && j.error) || "Couldn't link it. Try again.", code: (j && j.code) || null };
+    return { ok: true, id: j.id };
+  }, { ok: false, error: "Not allowed." });
   handle("gvd:reads:run", async (e, _o, raw) => {
     const v = validateReadRequest(raw);
     if (!v.ok) return { ok: false, status: "failed", error: v.error, code: "bad_read" };

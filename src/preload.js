@@ -29,6 +29,8 @@ const tiktok = isApp ? Object.freeze({
   open: () => ipcRenderer.invoke("gvd:tiktok:open"),
   // { signedIn, handle? } from the TikTok window's own session; never opens the window
   status: () => ipcRenderer.invoke("gvd:tiktok:status"),
+  // cloud posting: hand the cloud poster this window's TikTok login → { ok, id } (poll the platform) | { ok: false, error }
+  linkCloud: () => ipcRenderer.invoke("gvd:tiktok:linkCloud"),
   onProgress: (cb) => {
     const fn = (_e, p) => { try { cb(p); } catch { /* the page's own problem */ } };
     ipcRenderer.on("gvd:tiktok:progress", fn);
