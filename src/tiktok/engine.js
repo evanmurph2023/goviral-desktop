@@ -312,6 +312,8 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
   }
   async function search(term) {
     tried.add(term.toLowerCase());
+    // No search box on this list: read it as it is; product_pick turns its pages.
+    if (!(await visible("productSearch"))) { const rows = await productRows(); note(`no search box: reading the list (${rows.length} row(s))`); return rows; }
     const before = sigOf(await productRows());
     await click("productSearch");
     await page.clearFocused();
@@ -434,7 +436,15 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
       else note("no Products choice to press: Next");
       const next = await waitFor("linkNext", { ms: 3000, enabled: true });
       if (next) { note(`click ${how("linkNext", next)}`); await page.clickRef(next.ref); }
-      if (!(await waitFor("productSearch", { ms: opt ? T.find : 4000 }))) throw new StepMissed(opt ? "productSearch not found" : "productsOption not found, and Next didn't open the product list");
+      // The product list: a search box, or (TikTok's "Showcase products" on some accounts, 2026-10-06:
+      // the cloud showed no search box at all) the products themselves.
+      const until = Date.now() + (opt ? T.find : 4000);
+      for (;;) {
+        if (await visible("productSearch")) return;
+        if ((await productRows()).length) { note("the product list, no search box"); return; }
+        if (Date.now() > until) throw new StepMissed(opt ? "no product list after Next" : "productsOption not found, and Next didn't open the product list");
+        await page.sleep(400);
+      }
     },
     async product_search(job) { await search(searchTerms(job.product)[0]); },
     async product_pick(job) {
