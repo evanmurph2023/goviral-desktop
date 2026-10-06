@@ -352,6 +352,8 @@ const TARGETS = {
   productNameError: [{ text: "(invalid|unsupported|special|illegal|not (allowed|supported|valid))\\s*(characters?|symbols?|emojis?)|characters?.{0,40}(not|n.t) (allowed|supported|valid|accepted)|can.?t (contain|include|use)|cannot (contain|include|use)|only (letters|numbers|alphanumeric)|remove (the )?(special|invalid|unsupported)", within: `${inDlg("div, p, span")}, [role=alert], [class*=toast i], [class*=error i]` }],
   productAdd: [{ text: "^(\\+\\s*)?(add|confirm)$", within: DLG_BTN }],
   dialog: [{ css: DLG }],
+  // TikTok's cookie banner (shown in some regions, 2026-10-06 on the cloud): always the privacy-preserving choice.
+  cookieDecline: [{ text: "^(decline optional cookies|decline all|reject (all|optional)( cookies)?)$", within: "button, [role=button]" }],
   postButton: [{ css: 'button[data-e2e="post_video_button"]' }, { text: "^post( now)?$", within: "button" }],
   // a "Post now?" confirmation, only ever inside a dialog (never the page's own button twice)
   postNowDialog: [{ text: "^post now$", within: DLG_BTN }],

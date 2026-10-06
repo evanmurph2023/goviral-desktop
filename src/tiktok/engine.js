@@ -123,6 +123,9 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
 
   // A captcha or a login page: the creator's turn. Polls until it is gone (or times out).
   async function blockers() {
+    // A cookie banner covers the page's buttons: decline the optional cookies, then carry on.
+    const banner = await safeFind("cookieDecline");
+    if (banner) { await page.clickRef(banner.ref).catch(() => {}); note("declined optional cookies"); }
     const captcha = await safeFind("captcha");
     const loginUrl = /\/login(\b|\/|\?|$)/i.test(page.url());
     const login = loginUrl || (await safeFind("login"));
