@@ -22,20 +22,33 @@ const { TRYBE_ORIGIN } = require("./trybe");
 const { STEP_WORDS, safeFileName, TIKTOK_UPLOAD_URL } = require("./rules");
 
 const MAX_BYTES = 4 * 1024 ** 3;
-const AI_FETCH_MS = 35000; // the platform's route allows 30 s; the engine gives up at 40 s either way
+const AI_FETCH_MS = 58000; // the platform's route allows 60 s; the engine gives up at 60 s either way
+const LEARN_FETCH_MS = 6000;
 const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
 
 // The platform's AI fallback, called with the app's own sign-in (the default session's cookie).
+//   nextAction  POST /api/groot-post/next-action: { action, actions? } (actions = a short plan)
+//   learned     POST /api/groot-post/learned: the fixes Groot learned (this creator's, everyone's)
+//   learn       POST /api/groot-post/learn: a fix the AI found ({ solved }) and how learned ones did ({ used })
 function makeGrootClient({ fetchImpl, origin }) {
+  const post = async (p, body, ms) => {
+    const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined;
+    const res = await fetchImpl(`${origin}${p}`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body), signal });
+    return { res, j: await res.json().catch(() => null) };
+  };
   return {
     async nextAction(body) {
       try {
-        const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(AI_FETCH_MS) : undefined;
-        const res = await fetchImpl(`${origin}/api/groot-post/next-action`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body), signal });
-        const j = await res.json().catch(() => null);
-        if (res.ok && j && j.ok && j.action) return { ok: true, action: j.action };
+        const { res, j } = await post("/api/groot-post/next-action", body, AI_FETCH_MS);
+        if (res.ok && j && j.ok && j.action) return { ok: true, action: j.action, ...(Array.isArray(j.actions) ? { actions: j.actions } : {}) };
         return { ok: false, error: (j && typeof j.error === "string" && j.error) || `Groot couldn't see the page (${res.status}).` };
       } catch { return { ok: false, error: "Groot couldn't reach GoViral. Check your internet." }; }
+    },
+    async learned(body) {
+      try { const { res, j } = await post("/api/groot-post/learned", body, LEARN_FETCH_MS); return res.ok && j && j.ok ? j : { ok: false }; } catch { return { ok: false }; }
+    },
+    async learn(body) {
+      try { const { res } = await post("/api/groot-post/learn", body, LEARN_FETCH_MS); return { ok: res.ok }; } catch { return { ok: false }; }
     },
   };
 }

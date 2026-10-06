@@ -15,9 +15,9 @@
 //
 // Every step first tries its scripted way (rules.js TARGETS). When a step cannot find its target
 // in time, or its check fails afterwards, the step asks Groot (POST /api/groot-post/next-action):
-// the page's visible elements and a screenshot go up, ONE action comes back (click / type / press /
-// scroll / wait / done / need_user), it is checked again here (rules.js validateAction), done with
-// human pacing, and the step checks again. At most MAX_AI_PER_STEP tries a step and
+// the page's visible elements and a screenshot go up, a short plan comes back (click / type / clear
+// / press / scroll / wait / done / need_user), every action is checked again here (rules.js
+// validateAction), done with human pacing, and the step checks again. At most MAX_AI_PER_STEP tries a step and
 // MAX_AI_PER_POST a post (the server caps it too). The product is never the AI's choice: a row it
 // clicks must still match the creator's words (CHECK.product_pick).
 // When Groot can't (or can't be reached), the step goes to the creator: "needs you", with plain
@@ -26,8 +26,22 @@
 // every wait has a limit (rules.js TIMEOUTS), and the upload waits long only while TikTok shows it
 // moving.
 //
-// Every step logs its start, its end, how long it took, what it used (the selector, Groot, the
-// creator) and why it missed; run() returns the whole trail (`steps`) for the app.
+// v1.2.4 (2026-10-06, Drew: a post went out "Only you"; Groot asked him to take a "|" out of the
+// product name by hand; "make him as smart as you", "he needs to be able to learn"):
+//   - privacy: "Who can watch this video" is set to the creator's choice (job.privacy, else
+//     Everyone) right before Post / the handoff, and read back. Nothing else in the settings.
+//   - the product name: found wherever it is (selectors, a learned field, any field in the dialog
+//     holding characters TikTok rejects); fixed when TikTok says so OR refuses Add while it holds
+//     them; only the rejected characters come out. The AI may type only those cleaned names.
+//   - a smarter fallback: each look sends what the scripted step tried and why it missed, the page
+//     (with its dialog, notices, labels, data-e2e), the earlier actions WITH what happened after
+//     each; the answer may be a short plan (several actions on what is on screen now).
+//   - learning: a step the AI gets done is reported as a fix (the platform keeps it for this
+//     creator and, without anything personal, for everyone); later posts try learned fixes FIRST,
+//     report every use, and a fix that misses is demoted.
+//
+// Every step logs its start, its end, how long it took, what it used (the selector, a learned fix,
+// Groot, the creator) and why it missed; run() returns the whole trail (`steps`) for the app.
 //
 // Blockers: a captcha or a login page pauses everything, says so in the window's bar and in the
 // app, and waits for the creator (Groot never solves a captcha and never types a password).
@@ -42,7 +56,7 @@
 // error, code, step, steps, ms, aiSteps }.
 "use strict";
 
-const { TARGETS, AI_STEPS, STEP_WORDS, STEP_HELP, TIMEOUTS, MAX_AI_PER_STEP, MAX_AI_PER_POST, NOT_IN_SHOWCASE, planSteps, validateAction, captionText, captionParts, normCaption, showcaseList, pickProduct, searchTerms, isProductRow, SHOWCASE_PAGES, cleanProductName, productScore, PICK_AT, TIKTOK_UPLOAD_URL } = require("./rules");
+const { TARGETS, AI_STEPS, STEP_WORDS, STEP_HELP, TIMEOUTS, MAX_AI_PER_STEP, MAX_AI_PER_POST, NOT_IN_SHOWCASE, planSteps, validateAction, captionText, captionParts, normCaption, showcaseList, pickProduct, searchTerms, isProductRow, SHOWCASE_PAGES, cleanProductName, productScore, PICK_AT, TIKTOK_UPLOAD_URL, KEYS, PRIVACY, parsePrivacy, privacyOf, privacyOptionWays, LEARNABLE, MAX_PLAN, NAME_STEPS, typeValues, describeElement, learnedWays, variantOf, isRecipe, scrubRecipe } = require("./rules");
 
 class StepMissed extends Error {}
 class Failed extends Error { constructor(message, code) { super(message); this.code = code || null; } }
@@ -70,10 +84,11 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
 
   // A page read that never hangs and never throws for a slow page: null (not found) instead.
   let quietUntil = 0;
+  // `name` is a TARGETS name, or a list of ways (a learned target, a privacy option)
   async function safeFind(name, value) {
-    try { return await page.find(TARGETS[name], value); } catch (e) {
+    try { return await page.find(Array.isArray(name) ? name : TARGETS[name], value); } catch (e) {
       if (e && e.stopped) throw e;
-      if (Date.now() > quietUntil) { quietUntil = Date.now() + 10000; log("tiktok page read failed", current, name, e && e.message); }
+      if (Date.now() > quietUntil) { quietUntil = Date.now() + 10000; log("tiktok page read failed", current, Array.isArray(name) ? "ways" : name, e && e.message); }
       return null;
     }
   }
@@ -321,25 +336,44 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
   }
   const noResults = () => visible("productNoResults");
 
-  // The link name TikTok shows after Next. Left exactly as it is, unless TikTok says it has
-  // characters it won't take: those come out (emoji and symbols first, then all but letters,
-  // numbers and spaces), and nothing else changes.
-  async function fixProductName() {
-    if (!(await visible("productNameError"))) return true;
-    const input = await waitFor("productNameInput", { ms: 3000 });
-    if (!input) return false;
+  // The link name TikTok shows after Next. Left exactly as it is, unless TikTok won't take it: it
+  // says so (productNameError), or it refuses Add while the name holds characters it rejects
+  // (`refused`; Drew's post, 2026-10-05: no message Groot knew, Add did nothing because of a "|").
+  // Then those characters come out (emoji and symbols first, then all but letters, numbers and
+  // spaces), and nothing else changes. The field is found wherever it is: the selectors, a learned
+  // field, or any field in the dialog holding rejected characters (TARGETS.productNameInput).
+  // Returns true (nothing to fix, or fixed), false (TikTok still refuses / no field: the AI looks).
+  async function nameField() {
+    for (const L of learnedFor("product_name").concat(learnedFor("product_add"))) {
+      for (const a of L.recipe) {
+        if (a.do !== "type" || a.value !== "clean_name") continue;
+        const hit = await safeFind(learnedWays(a.target));
+        if (hit) { note("the name field from a learned fix"); return hit; }
+      }
+    }
+    return waitFor("productNameInput", { ms: 3000 });
+  }
+  async function fixProductName({ refused = false } = {}) {
+    const said = await safeFind("productNameError");
+    if (!said && !refused) return true;
+    const input = await nameField();
+    if (!input) { note(`TikTok refuses the name${said ? ` ("${short(said.text, 60)}")` : ""}, and Groot can't find the name field`); return false; }
+    let changed = false;
     for (const level of [1, 2]) {
       const now = await textOf(input.ref);
       const clean = cleanProductName(now, level);
-      if (!clean || clean === now) continue;
-      note(`product name level ${level}: ${now.length} → ${clean.length} chars`);
+      if (!clean || clean === now.replace(/\s+/g, " ").trim()) continue;
+      note(`product name level ${level}: ${now.length} → ${clean.length} chars${said ? ` (TikTok: "${short(said.text, 50)}")` : " (TikTok refused Add)"}`);
       say("product_name", "Taking out characters TikTok won't take in the product name");
       await page.clickRef(input.ref);
       await page.clearFocused();
       await page.type(clean);
       await page.pause("afterClick");
+      changed = true;
       if (!(await visible("productNameError"))) return true;
     }
+    // Refused, but nothing in the name to take out: something else is wrong (the AI looks).
+    if (refused && !changed) return false;
     return !(await visible("productNameError"));
   }
 
@@ -392,10 +426,15 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
       throw new StepMissed("Add link didn't open the link box");
     },
     async product_tab() {
-      await click("productsOption");
+      // Products may already be the choice (Drew's TikTok: no Products option to press, only Next,
+      // 2026-10-05): then Next, and the product search must show.
+      const opt = await waitFor("productsOption", { ms: (await visible("productSearch")) ? 500 : 3000 });
+      if (opt) { note(`click ${how("productsOption", opt)}`); await page.clickRef(opt.ref); }
+      else if (await visible("productSearch")) { note("already on the product list"); return; }
+      else note("no Products choice to press: Next");
       const next = await waitFor("linkNext", { ms: 3000, enabled: true });
       if (next) { note(`click ${how("linkNext", next)}`); await page.clickRef(next.ref); }
-      if (!(await waitFor("productSearch", { ms: T.find }))) throw new StepMissed("productSearch not found");
+      if (!(await waitFor("productSearch", { ms: opt ? T.find : 4000 }))) throw new StepMissed(opt ? "productSearch not found" : "productsOption not found, and Next didn't open the product list");
     },
     async product_search(job) { await search(searchTerms(job.product)[0]); },
     async product_pick(job) {
@@ -438,35 +477,72 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
       });
     },
     async product_next() {
-      await click("productNext", { enabled: true, ms: 5000 });
-      await page.pause("afterClick");
+      // Next must move the box on (the name step, Add, or closed). On Drew's post it didn't the
+      // first time and the AI had to press it again (2026-10-05): pressed again once, then Groot.
+      for (let i = 0; i < 2; i++) {
+        await click("productNext", { enabled: true, ms: i ? 2000 : 5000 }).catch((e) => { if (i && e instanceof StepMissed) return null; throw e; });
+        const until = Date.now() + 4000;
+        for (;;) {
+          await page.pause("poll");
+          if (await CHECK.product_next()) return;
+          if (Date.now() > until) break;
+        }
+        if (!(await visible("productNext"))) break;
+        note("Next didn't move the product box on: pressing it again");
+      }
+      throw new StepMissed("Next didn't open the product name step or Add");
     },
     async product_name() {
       // Some accounts skip the name step: on as soon as Add shows (or the box closed) without it.
       const until = Date.now() + 4000;
       for (;;) {
         if (await visible("productNameInput")) break;
-        if ((await visible("productAdd")) || !(await visible("dialog"))) { note("no name step"); return; }
+        if ((await visible("productAdd")) || !(await visible("dialog"))) { note("no name field: the name is checked when Add is pressed"); return; }
         if (Date.now() > until) { note("no name step showed"); return; }
         await page.pause("poll");
       }
-      if (!(await fixProductName())) throw new Failed("TikTok wouldn't take the product's link name. Fix it in the TikTok window.", "product_name");
+      if (!(await fixProductName())) throw new StepMissed("TikTok still won't take the product's link name");
       note("the name stays as TikTok has it");
     },
     async product_add() {
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 4; i++) {
         const add = await waitFor("productAdd", { ms: 5000 });
         if (!add) break;
-        if (add.disabled && !(await fixProductName())) throw new Failed("TikTok wouldn't take the product's link name. Fix it in the TikTok window.", "product_name");
+        if (add.disabled && !(await fixProductName({ refused: true }))) throw new StepMissed("Add is off and the name has nothing Groot may take out");
         note(`click ${how("productAdd", add)}`);
         await page.clickRef(add.ref);
         const until = Date.now() + 3000;
         while ((await visible("dialog")) && Date.now() < until) await page.pause("poll");
         if (!(await visible("dialog"))) return;
-        // TikTok may only complain about the name once Add is pressed
-        if (!(await fixProductName())) throw new Failed("TikTok wouldn't take the product's link name. Fix it in the TikTok window.", "product_name");
+        // TikTok refused Add: often the name (it may only say so once Add is pressed, or not at all)
+        note("the product box is still open after Add");
+        if (!(await fixProductName({ refused: true }))) throw new StepMissed("TikTok refused Add and the name has nothing Groot may take out");
       }
       if (await visible("dialog")) throw new StepMissed("the product box didn't close after Add");
+    },
+    // Who can watch this video: the creator's choice (or Everyone), set and read back. Only this
+    // setting: comments, duet, stitch, the AI-generated and branded-content labels stay as they are.
+    async privacy(job) {
+      if (await isPosted()) { note("already posted (the creator pressed Post)"); return; }
+      const want = wantPrivacy(job);
+      const label = PRIVACY[want].label;
+      const ctl = await waitFor("privacyControl", { ms: T.find });
+      if (!ctl) throw new StepMissed("privacyControl not found");
+      const was = await privacyNow(ctl);
+      if (was === want) { note(`who can watch: already ${label}`); return; }
+      note(`who can watch was "${short(await textOf(ctl.ref), 30) || "?"}": setting ${label}`);
+      say("privacy", `Setting who can watch to ${label}`);
+      for (let i = 0; i < 2; i++) {
+        const c = (await safeFind("privacyControl")) || ctl;
+        await page.clickRef(c.ref);
+        const opt = await waitFor(privacyOptionWays(want), { ms: 3000 });
+        if (!opt) { await page.key("Escape").catch(() => {}); continue; }
+        note(`click the "${short(opt.text, 30)}" option`);
+        await page.clickRef(opt.ref);
+        await page.pause("afterClick");
+        if ((await privacyNow()) === want) { note(`who can watch: ${label} (read back)`); return; }
+      }
+      throw new StepMissed(`who can watch didn't change to ${label}`);
     },
     async wait_processed(job) { await waitUploaded(job); },
     async post() {
@@ -501,13 +577,17 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     // TikTok says uploaded, or Post is on with no progress left (what the AI saw on the screen)
     wait_processed: async () => (await uploadDone()) || ((await safeFind("postButton").then((b) => !!b && !b.disabled)) && !(await visible("uploadProgress")) && (await visible("captionBox"))),
     caption: async (job) => (await captionNow()) === wantCaption(job),
-    product_open: async () => visible("dialog"),
+    // the link box (not some other dialog): its choice, its Next, or the product search
+    product_open: async () => (await visible("dialog")) && ((await visible("productsOption")) || (await visible("linkNext")) || (await visible("productSearch"))),
     product_tab: async () => visible("productSearch"),
     product_search: async () => (await safeRows("productRows")).length > 0 || noResults(),
     // the selected row must be the creator's product, whoever clicked it
     product_pick: async (job) => [...(await safeRows("productSelected")), ...(await productRows()).filter((r) => r.selected)].some((r) => productScore(job.product, r.text) >= PICK_AT),
     product_next: async () => (await visible("productNameInput")) || (await visible("productAdd")) || !(await visible("dialog")),
+    // TikTok has stopped complaining about the name (or the box moved on / closed)
+    product_name: async () => !(await visible("productNameError")) && ((await visible("productAdd")) || !(await visible("dialog")) || !(await nameStillRejected())),
     product_add: async () => !(await visible("dialog")),
+    privacy: async (job) => (await privacyNow()) === wantPrivacy(job),
     post: async () => (await isPosted()) || (await visible("postNowDialog")),
     confirm_posted: async () => isPosted(),
   };
@@ -516,14 +596,140 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
     upload: async () => visible("fileInput"), // Groot attaches the file itself once the upload area shows
     product_pick: async () => (await safeRows("productSelected")).length > 0 || (await productRows()).some((r) => r.selected),
     wait_processed: async () => (await CHECK.wait_processed()) || (await isPosted()),
+    // the creator may pick another privacy in the window: theirs to choose
+    privacy: async () => (await privacyNow()) !== null,
+    product_name: async () => !(await visible("dialog")) || !(await visible("productNameError")),
   };
+
+  // ---- who can watch ----------------------------------------------------------------------------
+  const wantPrivacy = (job) => parsePrivacy(job && job.privacy) || "everyone";
+  // What "Who can watch this video" shows now (a PRIVACY key), or null.
+  async function privacyNow(hit) {
+    const c = hit || (await safeFind("privacyControl"));
+    if (c) return privacyOf((await textOf(c.ref)) || c.text);
+    // The selectors miss it (TikTok changed it; the AI found it): what the page shows next to
+    // "Who can watch", read from the snapshot (a radio counts only when it is the checked one).
+    const view = await page.snapshot().catch((e) => { if (e && e.stopped) throw e; return null; });
+    const els = ((view && view.elements) || []).filter((e) => !e.dlg && e.role !== "option" && /who can (watch|view|see)/i.test(`${e.near || ""} ${e.label || ""}`));
+    const el = els.find((e) => (/radio/.test(e.role) || e.type === "radio" ? e.checked : true) && privacyOf(e.value || e.text || e.name));
+    return el ? privacyOf(el.value || el.text || el.name) : null;
+  }
+  // The name field still holds characters TikTok rejects (for CHECK.product_name).
+  async function nameStillRejected() {
+    const f = await safeFind("productNameInput");
+    if (!f) return false;
+    const v = await textOf(f.ref);
+    return cleanProductName(v, 1) !== v.replace(/\s+/g, " ").trim();
+  }
+
+  // ---- learning -----------------------------------------------------------------------------------
+  // The platform's learned fixes for this creator (and everyone), asked for once per post while
+  // TikTok Studio opens; tried FIRST on a LEARNABLE step. Every use is reported (worked / missed),
+  // so the platform demotes a fix that stops working. A step the AI gets done is reported as a new
+  // fix. Nothing here ever blocks a post: no answer in 5 s = no learned fixes.
+  const learned = { list: [], ready: null, used: 0, saved: 0 };
+  let postId = null;
+  function loadLearned(job) {
+    if (!groot || typeof groot.learned !== "function") { learned.ready = Promise.resolve([]); return; }
+    let timer = null;
+    learned.ready = Promise.race([
+      Promise.resolve().then(() => groot.learned({ postId: job.postId, platform: "tiktok" })).catch(() => null),
+      new Promise((r) => { timer = setTimeout(() => r(null), 5000); }),
+    ]).then((r) => {
+      clearTimeout(timer);
+      learned.list = r && r.ok && Array.isArray(r.targets) ? r.targets.filter((t) => t && typeof t.id === "string" && LEARNABLE.has(t.step) && isRecipe(t.recipe)).slice(0, 40) : [];
+      if (learned.list.length) log("tiktok learned fixes", learned.list.length, learned.list.map((t) => `${t.step}(${t.scope || "?"})`).join(" "));
+      return learned.list;
+    });
+  }
+  const learnedFor = (step) => learned.list.filter((t) => t.step === step);
+  const tell = (body) => {
+    if (!groot || typeof groot.learn !== "function") return;
+    Promise.resolve().then(() => groot.learn({ postId, platform: "tiktok", ...body })).catch(() => {});
+  };
+  const targetWords = (t) => (t ? `${t.role || t.tag}${t.text ? ` "${short(t.text, 30)}"` : t.label ? ` "${short(t.label, 30)}"` : t.privacy ? " (a privacy choice)" : ""}` : "?");
+  async function waitCheck(step, job, ms) {
+    if (!CHECK[step]) return true;
+    const until = Date.now() + ms;
+    for (;;) {
+      if (await CHECK[step](job).catch((e) => { if (e && e.stopped) throw e; return false; })) return true;
+      if (Date.now() > until) return false;
+      await page.pause("poll");
+    }
+  }
+  // One learned fix, done the way the AI did it. Null = it worked; else why it missed.
+  async function replay(fix, step, job) {
+    for (const act of fix.recipe) {
+      if (act.do === "press") { await page.key(act.key); continue; }
+      const hit = await waitFor(learnedWays(act.target, wantPrivacy(job)), { ms: 3000 });
+      if (!hit) return `${targetWords(act.target)} isn't on the page`;
+      if (act.do === "click") { await page.clickRef(hit.ref); continue; }
+      if (act.do === "clear") { await page.clickRef(hit.ref); await page.clearFocused(); continue; }
+      // type: only ever a cleaned name, worked out now from what the field holds
+      const now = await textOf(hit.ref);
+      let text = cleanProductName(now, 1);
+      if (text === now.replace(/\s+/g, " ").trim()) text = cleanProductName(now, 2);
+      if (!text || text === now.replace(/\s+/g, " ").trim()) continue; // nothing to take out
+      await page.clickRef(hit.ref);
+      await page.clearFocused();
+      await page.type(text);
+    }
+    return (await waitCheck(step, job, 3000)) ? null : "the step's check failed after it";
+  }
+  async function tryLearned(step, job) {
+    if (!LEARNABLE.has(step) || !learned.ready) return false;
+    await learned.ready;
+    const mine = learnedFor(step);
+    if (!mine.length) return false;
+    let v = "";
+    try { v = variantOf(await page.variant()); } catch (e) { if (e && e.stopped) throw e; }
+    // the same page variant first; otherwise the platform's order (the creator's own, then the most wins)
+    const order = [...mine.filter((t) => t.variant === v), ...mine.filter((t) => t.variant !== v)].slice(0, 2);
+    for (const fix of order) {
+      const why = await replay(fix, step, job);
+      tell({ used: [{ id: fix.id, ok: !why }] });
+      if (!why) { learned.used++; note(`learned fix worked (${fix.scope === "global" ? "learned on other accounts" : "learned on this account"}, ${fix.wins || 1} win(s) before)`); return true; }
+      note(`learned fix missed: ${why} (reported, it is trusted less now)`);
+    }
+    return false;
+  }
+  // What the AI did on a step it got done → a fix for next time. Clicks on things the snapshot
+  // described, emptying a box, a cleaned name, keys; never a click on a bare point, never more
+  // than MAX_PLAN + 1 actions, never on a step that isn't LEARNABLE.
+  function learnFrom(step, variant, raw, job) {
+    if (!LEARNABLE.has(step) || !raw.length || raw.length > MAX_PLAN + 1 || raw.some((r) => !r)) return;
+    const recipe = scrubRecipe(raw, job);
+    // every target must still say how to find it (words, a label, data-e2e...) once the post's own words are out
+    if (!isRecipe(recipe) || recipe.some((a) => a.target && !(a.target.text || a.target.label || a.target.e2e || a.target.ph || a.target.near || a.target.privacy))) return;
+    learned.saved++;
+    tell({ solved: { step, variant, recipe } });
+    note("what worked is saved for next time");
+  }
+
+  // The state after the AI's actions, in a few words, for its next look ("→ the box is still open").
+  async function outcome(step, job) {
+    const bits = [(await visible("dialog")) ? "a dialog is open" : "no dialog is open"];
+    const err = await safeFind("productNameError");
+    if (err) bits.push(`TikTok says "${short(err.text, 80)}"`);
+    if (step === "privacy") bits.push(`who can watch shows ${PRIVACY[(await privacyNow())] ? PRIVACY[await privacyNow()].label : "something Groot can't read"}`);
+    if (CHECK[step]) bits.push((await CHECK[step](job).catch(() => false)) ? "the step's check passes" : "the step isn't done yet");
+    return bits.join(", ");
+  }
 
   // ---- the AI fallback ------------------------------------------------------------------------
   // `tries`: how many actions this call may take. `waitReturns`: a "wait" answer goes back to the
   // caller (the upload loop keeps waiting itself) instead of costing more tries.
+  // Each look sends the page (elements + screenshot), what the scripted step tried and why it
+  // missed (the step's notes), and the earlier actions WITH what happened after each; the answer is
+  // a short plan (up to MAX_PLAN actions on the elements on screen now, the platform's `actions`;
+  // an older platform's single `action` works too). Every action is checked again here
+  // (validateAction) before it runs. A step the AI gets done is learned (learnFrom).
   async function askGroot(step, job, { tries = MAX_AI_PER_STEP, waitReturns = false } = {}) {
     const history = [];
-    const values = [captionText(job.caption, job.hashtags), job.product || ""];
+    const recipe = [];      // what the AI did on this step, described, for learning
+    let variant = null;     // the page it was stuck on
+    const caption = captionText(job.caption, job.hashtags);
+    const finished = () => { learnFrom(step, variant, recipe, job); return "done"; };
     for (let i = 0; i < tries; i++) {
       if (aiUsed >= MAX_AI_PER_POST) throw new Failed("Groot has tried this one enough.");
       await blockers();
@@ -533,56 +739,88 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
       const t0 = Date.now();
       const view = await page.snapshot().catch((e) => { if (e && e.stopped) throw e; return null; });
       if (!view) throw new Failed("Groot couldn't read the page.");
+      if (variant === null) variant = variantOf(view);
+      const values = typeValues(step, job, view);
       const screenshot = await page.screenshot().catch(() => null);
+      const tried = notes.filter((n) => !/^Groot \(/.test(n)).slice(-8).map((n) => short(n, 200));
       let timer = null;
       const res = await Promise.race([
-        Promise.resolve().then(() => groot.nextAction({ postId: job.postId, step, view, screenshot, history })).catch(() => ({ ok: false, error: "Groot couldn't reach GoViral." })),
+        Promise.resolve().then(() => groot.nextAction({ postId: job.postId, step, view, screenshot, history, tried, privacy: wantPrivacy(job), plan: true })).catch(() => ({ ok: false, error: "Groot couldn't reach GoViral." })),
         new Promise((r) => { timer = setTimeout(() => r({ ok: false, error: `Groot didn't answer in ${Math.round(T.ai / 1000)} s.` }), T.ai); }),
       ]).finally(() => clearTimeout(timer));
       if (!res || !res.ok) { log("tiktok ai unavailable", step, secs(Date.now() - t0), (res && res.error) || ""); throw new Failed((res && res.error) || "Groot couldn't see the page."); }
-      const a = validateAction(res.action, view, values);
-      const el = a.ref !== undefined && a.ref !== null ? view.elements.find((e) => e.ref === a.ref) : null;
-      note(`Groot (${secs(Date.now() - t0)}): ${a.action}${el ? ` ref ${a.ref} "${short(el.name, 40)}"` : ""}${a.action === "need_user" ? ` ${a.reason}: ${a.message}` : ""}`);
-      switch (a.action) {
-        case "done":
-          if (!CHECK[step] || (await CHECK[step](job))) return "done";
-          history.push("said done, but the step's check failed");
+      const plan = (Array.isArray(res.actions) && res.actions.length ? res.actions : [res.action]).slice(0, MAX_PLAN).map((x) => validateAction(x, view, values));
+      const did = [];
+      for (let k = 0; k < plan.length; k++) {
+        const a = plan[k];
+        const el = a.ref !== undefined && a.ref !== null ? view.elements.find((e) => e.ref === a.ref) : null;
+        note(`Groot (${secs(Date.now() - t0)})${plan.length > 1 ? ` ${k + 1}/${plan.length}` : ""}: ${a.action}${el ? ` ref ${a.ref} "${short(el.name, 40)}"` : ""}${a.action === "type" ? ` ${a.text === caption ? "the caption" : a.text === job.product ? "the product" : "a cleaned name"}` : ""}${a.action === "need_user" ? ` ${a.reason}: ${a.message}` : ""}`);
+        try {
+          switch (a.action) {
+            case "done":
+              if (!CHECK[step] || (await CHECK[step](job))) return finished();
+              did.push("said done, but the step's check failed");
+              break;
+            case "need_user":
+              if (a.reason === "other") throw new Failed(a.message, step === "product_pick" && a.message.startsWith(NOT_IN_SHOWCASE) ? "product_not_found" : null);
+              if (blockerMode === "stop") throw new Failed(a.message, a.reason === "captcha" ? "captcha" : "login");
+              say(step, a.message, "needs_you", { reason: a.reason });
+              await page.sleep(4000);
+              await blockers();
+              did.push(`asked the creator (${a.reason})`);
+              break;
+            case "click":
+              if (a.ref !== undefined) await page.clickRef(a.ref); else await page.clickAt(a.x, a.y);
+              recipe.push(a.ref !== undefined ? (el ? { do: "click", target: describeElement(el) } : null) : null);
+              did.push(a.ref !== undefined ? `clicked ref ${a.ref} "${short((el || {}).name, 40)}"` : `clicked the point ${Math.round(a.x)},${Math.round(a.y)}`);
+              break;
+            case "clear":
+              await page.clickRef(a.ref);
+              await page.clearFocused();
+              recipe.push(el ? { do: "clear", target: describeElement(el) } : null);
+              did.push(`emptied ref ${a.ref} "${short((el || {}).name, 40)}"`);
+              break;
+            case "type": {
+              if (a.ref !== null) await page.clickRef(a.ref);
+              const cleaned = NAME_STEPS.has(step) && a.text !== caption && a.text !== job.product;
+              if (a.clear || cleaned || step === "caption" || step === "product_search") await page.clearFocused();
+              await page.type(a.text);
+              if (step === "caption") await page.key("Escape").catch(() => {});
+              // a cleaned name is learned as "clean the name in this field" (worked out again next time)
+              recipe.push(cleaned && el ? { do: "type", value: "clean_name", target: describeElement(el) } : null);
+              did.push(`typed ${a.text === caption ? "the caption" : a.text === job.product ? "the product" : `the cleaned name "${short(a.text, 60)}"`}${a.ref !== null ? ` into ref ${a.ref}` : ""}`);
+              break;
+            }
+            case "press": await page.key(a.key); recipe.push({ do: "press", key: a.key }); did.push(`pressed ${a.key}`); break;
+            case "scroll": await page.scroll(a.dy); did.push(`scrolled ${a.dy}`); break;
+            case "wait":
+              await page.sleep(a.ms);
+              did.push(`waited ${a.ms} ms`);
+              if (waitReturns) { history.push(did.join(", ")); return CHECK[step] && (await CHECK[step](job)) ? finished() : "wait"; }
+              break;
+          }
+        } catch (e) {
+          // a button from the plan went away (the page moved on): the AI looks again
+          if ((e && e.stopped) || e instanceof Failed || (e && e.needUser)) throw e;
+          did.push(`could not do it (${short(e && e.message, 60)})`);
           break;
-        case "need_user":
-          if (a.reason === "other") throw new Failed(a.message, step === "product_pick" && a.message.startsWith(NOT_IN_SHOWCASE) ? "product_not_found" : null);
-          if (blockerMode === "stop") throw new Failed(a.message, a.reason === "captcha" ? "captcha" : "login");
-          say(step, a.message, "needs_you", { reason: a.reason });
-          await page.sleep(4000);
-          await blockers();
-          history.push(`asked the creator (${a.reason})`);
-          break;
-        case "click":
-          if (a.ref !== undefined) await page.clickRef(a.ref); else await page.clickAt(a.x, a.y);
-          history.push(a.ref !== undefined ? `clicked ref ${a.ref} (${(el || {}).name || ""})` : `clicked ${Math.round(a.x)},${Math.round(a.y)}`);
-          break;
-        case "type":
-          if (a.ref !== null) await page.clickRef(a.ref);
-          if (step === "caption" || step === "product_search") await page.clearFocused();
-          await page.type(a.text);
-          if (step === "caption") await page.key("Escape").catch(() => {});
-          history.push(`typed ${a.text === values[1] ? "the product" : "the caption"}`);
-          break;
-        case "press": await page.key(a.key); history.push(`pressed ${a.key}`); break;
-        case "scroll": await page.scroll(a.dy); history.push(`scrolled ${a.dy}`); break;
-        case "wait":
-          await page.sleep(a.ms);
-          history.push(`waited ${a.ms} ms`);
-          if (waitReturns) return CHECK[step] && (await CHECK[step](job)) ? "done" : "wait";
-          break;
+        }
+        if (a.action === "done" || a.action === "need_user") break; // these end a plan
+        if (k < plan.length - 1) await page.pause("betweenSteps");
       }
-      if (CHECK[step] && a.action !== "need_user" && (await CHECK[step](job))) return "done";
+      if (CHECK[step] && plan.every((a) => a.action !== "need_user") && (await waitCheck(step, job, 1500))) return finished();
+      history.push(`${did.join(", ") || "nothing"} → ${await outcome(step, job)}`);
     }
     if (waitReturns) return "wait";
     throw new Failed(`Groot couldn't finish "${STEP_WORDS[step]}".`);
   }
 
-  // One step: scripted → Groot → the creator.
+  // One step: a learned fix → scripted → Groot → the creator.
   async function doStep(step, job) {
+    if (LEARNABLE.has(step)) {
+      const ok = await tryLearned(step, job).catch((e) => { if (e && e.stopped) throw e; if (e instanceof Failed) throw e; note(`learned fix error: ${short(e && e.message, 80)}`); return false; });
+      if (ok) return undefined;
+    }
     try {
       return await SCRIPTED[step](job);
     } catch (e) {
@@ -608,6 +846,8 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
 
   async function run(job) {
     const steps = planSteps(job);
+    postId = job.postId;
+    loadLearned(job);
     const t0 = Date.now();
     let outcome = "posted";
     let stepStart = t0;
@@ -618,7 +858,7 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
       trail.push(entry);
       log(ok ? "tiktok step done" : "tiktok step ended", current, secs(ms), entry.how || "", why || "");
     };
-    const summary = () => `${trail.map((s) => `${s.step} ${secs(s.ms)}${s.ai ? ` (${s.ai} AI)` : ""}${s.ok ? "" : " (ended here)"}`).join(", ")} · total ${secs(Date.now() - t0)}`;
+    const summary = () => `${trail.map((s) => `${s.step} ${secs(s.ms)}${s.ai ? ` (${s.ai} AI)` : ""}${s.ok ? "" : " (ended here)"}`).join(", ")} · total ${secs(Date.now() - t0)}${learned.used || learned.saved ? ` · learned fixes used ${learned.used}, saved ${learned.saved}` : ""}`;
     try {
       for (const step of steps) {
         current = step;
@@ -634,7 +874,7 @@ function createEngine({ page, groot, report = () => {}, uploadUrl = TIKTOK_UPLOA
       }
       log("tiktok post timings", outcome, summary());
       say(current, outcome === "posted" ? "Posted" : "Ready for you to post", outcome);
-      return { status: outcome, aiSteps: aiUsed, steps: trail, ms: Date.now() - t0 };
+      return { status: outcome, aiSteps: aiUsed, steps: trail, ms: Date.now() - t0, learnedUsed: learned.used, learnedSaved: learned.saved };
     } catch (e) {
       if (e && e.stopped) {
         finish(false, "stopped");

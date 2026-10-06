@@ -5,8 +5,11 @@
 //   - which addresses the TikTok window may show (isTikTokUrl, isLoginProviderUrl)
 //   - where a video may come from (parseSource: a GoViral export, a file the creator chose, Drive)
 //   - the scripted steps for one post (planSteps) and the selectors they try (TARGETS)
-//   - the product in the showcase (searchTerms, pickProduct) and the link name (cleanProductName)
+//   - the product in the showcase (searchTerms, pickProduct) and the link name (cleanProductName,
+//     nameFixes: the only names the AI may type)
+//   - who can watch the video (PRIVACY, parsePrivacy, privacyOf, privacyOptionWays)
 //   - the AI fallback's actions, checked again here before anything runs (validateAction)
+//   - learning: an element described for later (describeElement, learnedWays, variantOf, isRecipe)
 //   - human pacing (delay)
 "use strict";
 
@@ -97,8 +100,11 @@ function validatePostRequest(raw, { allowLocal = false } = {}) {
   const hashtags = Array.isArray(raw.hashtags) ? raw.hashtags.map((h) => str(h, 41).replace(/^#/, "")).filter((h) => HASHTAG.test(h)).slice(0, 5) : [];
   const product = platform === "trybe" || raw.product === null || raw.product === undefined ? null : str(raw.product, 80) || null;
   const name = str(raw.name, 120) || "GoViral video";
+  // Who can watch it on TikTok: the creator's choice in GoViral when the app sends one, else Everyone.
+  const privacy = platform === "tiktok" ? parsePrivacy(raw.privacy) : null;
+  if (platform === "tiktok" && !privacy) return { ok: false, error: "Who can watch it?" };
   const source = src.source;
-  return { ok: true, value: { postId, source, videoUrl: source.kind === "url" ? source.url : null, mode, caption, hashtags, product, name, platform, brand } };
+  return { ok: true, value: { postId, source, videoUrl: source.kind === "url" ? source.url : null, mode, caption, hashtags, product, name, platform, brand, privacy } };
 }
 
 // The text that goes into TikTok's description box: the caption, then the hashtags ("comfort
@@ -221,14 +227,68 @@ function searchTerms(product) {
 }
 
 // The product link name: Groot never renames it. Only when TikTok says it has characters it
-// won't take, they go: level 1 = emoji and symbols (✨ ★ ™ | / # @ …), level 2 = everything but
-// letters, numbers and spaces. Returns the name unchanged when there is nothing to take out.
+// won't take (or refuses Add while the name holds some), they go: level 1 = emoji and symbols
+// (✨ ★ ™ | / # @ …), level 2 = everything but letters, numbers and spaces. Returns the name
+// unchanged when there is nothing to take out. The platform has the same function
+// (src/lib/groot-post.ts cleanProductName): the AI may type only what this returns.
+const REJECTED_CHARS = "[\\p{Extended_Pictographic}\\p{S}\\p{Cc}\\p{Cf}|/\\\\<>{}\\[\\]~^*#@`\"]";
 function cleanProductName(name, level = 1) {
   const t = String(name || "");
   const out = level >= 2
     ? t.replace(/[^\p{L}\p{N} ]+/gu, " ")
-    : t.replace(/[\p{Extended_Pictographic}\p{S}\p{Cc}\p{Cf}|/\\<>{}[\]~^*#@`"]+/gu, " ");
+    : t.replace(new RegExp(`${REJECTED_CHARS}+`, "gu"), " ");
   return out.replace(/\s+/g, " ").trim();
+}
+// The cleaned names the AI may type on the name steps (product_name, product_add): every field in
+// the dialog holding a value with characters TikTok rejects, cleaned at level 1 and 2. A value
+// cut short by the snapshot (MAX_VALUE) is never offered: typing it would rename the product.
+const MAX_VALUE = 300;
+function nameFixes(view) {
+  const out = [];
+  for (const e of (view && view.elements) || []) {
+    const v = typeof e.value === "string" ? e.value : "";
+    if (!e.dlg || !v || v.length >= MAX_VALUE || e.type === "password" || e.type === "search") continue;
+    const plain = v.replace(/\s+/g, " ").trim();
+    for (const level of [1, 2]) {
+      const c = cleanProductName(v, level);
+      if (c && c !== plain && !out.includes(c)) out.push(c);
+    }
+  }
+  return out.slice(0, 6);
+}
+const NAME_STEPS = new Set(["product_name", "product_add"]);
+
+// ---- who can watch the video ---------------------------------------------------------------------
+// TikTok remembers the account's last choice, so a post can go out "Only you" without anyone
+// touching it (Drew's post, 2026-10-05). Groot sets it to what the creator chose in GoViral, or
+// Everyone, before Post (Auto) and before the handoff (Manual), and reads it back. Nothing else in
+// the settings is ever touched.
+const PRIVACY = {
+  everyone: { label: "Everyone", is: "\\b(everyone|public)\\b", opt: "everyone|public" },
+  followers: { label: "Followers", is: "\\bfollowers\\b", opt: "followers" },
+  friends: { label: "Friends", is: "\\b(mutual )?friends\\b", opt: "(mutual )?friends" },
+  only_me: { label: "Only me", is: "\\b(only (me|you)|private)\\b", opt: "only (me|you)|private" },
+};
+const PRIVACY_VALUES = Object.keys(PRIVACY);
+const PRIVACY_ANY = "\\b(everyone|public|followers|friends|only (me|you)|private)\\b";
+const PRIVACY_ALIASES = { everyone: "everyone", public: "everyone", followers: "followers", friends: "friends", only_me: "only_me", onlyme: "only_me", only_you: "only_me", private: "only_me", self: "only_me" };
+function parsePrivacy(v) {
+  if (v === undefined || v === null || v === "") return "everyone";
+  const k = String(v).trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return PRIVACY_ALIASES[k] || null;
+}
+// What the control shows, as one of PRIVACY_VALUES (null = can't tell). "Only you" is checked
+// before "Everyone" so a label like "Only you (not everyone)" reads right.
+function privacyOf(text) {
+  const t = String(text || "").toLowerCase();
+  for (const k of ["only_me", "friends", "followers", "everyone"]) if (new RegExp(PRIVACY[k].is, "i").test(t)) return k;
+  return null;
+}
+const OPTION_SEL = "[role=option], [role=menuitem], [role=menuitemradio], [role=radio], [role=listbox] li, [role=listbox] div, [role=menu] li, [class*=option i], label";
+// The option to press in TikTok's list (the words start the option: "Everyone", "Only you").
+function privacyOptionWays(value) {
+  const p = PRIVACY[value] || PRIVACY.everyone;
+  return [{ text: `^\\s*(${p.opt})\\b`, within: OPTION_SEL, privacyOption: value }];
 }
 
 // ---- the scripted steps -------------------------------------------------------------------------
@@ -237,9 +297,20 @@ function cleanProductName(name, level = 1) {
 // `hidden: true` finds elements that are not visible (TikTok hides its file input). For lists
 // (the product rows) page.rows() returns every match with its words. These follow Drew's walk
 // through TikTok Studio (2026-10-04); when one misses, the step asks Groot (the AI fallback).
+// More kinds of way (2026-10-06, page.js FIND): `near` (a regex the text AROUND the element must
+// match, its label: "Who can watch this video"), `has` (a regex its own words must match), `notIn`
+// (a selector it must not be inside), `valueRe` (a regex its value must match: a name field holding
+// characters TikTok rejects), and `learned` (a description of an element Groot's AI found before).
 const BTN = "button, [role=button], [role=menuitem], [role=option], [role=tab], a, label, div[tabindex], span[tabindex]";
 const DLG = "[role=dialog]";
-const DLG_BTN = `${DLG} button, ${DLG} [role=button]`;
+// Buttons and fields "in the dialog": TikTok's own modals too (TUXModal), which may not say
+// role=dialog (the name step's Add was missed on Drew's post, 2026-10-05).
+const DLG_ANY = `${DLG}, [aria-modal="true"], [class*="TUXModal"]`;
+const inDlg = (sel) => DLG_ANY.split(",").flatMap((d) => sel.split(",").map((s) => `${d.trim()} ${s.trim()}`)).join(", ");
+const DLG_BTN = inDlg("button, [role=button]");
+const NOT_SEARCH = ':not([type=search]):not([placeholder*="search" i])';
+const NAME_FIELD = inDlg(`input:not([type])${NOT_SEARCH}, input[type=text]${NOT_SEARCH}, textarea, [contenteditable=true]`);
+const WHO = "who can (watch|view|see)";
 const TARGETS = {
   // Upload → Videos, when the page did not open on the upload area
   uploadNav: [{ css: '[data-e2e="upload_nav"]' }, { text: "^upload$", within: "nav a, nav button, nav [role=button], aside a, aside button, a, button" }],
@@ -252,8 +323,10 @@ const TARGETS = {
   uploadProgress: [{ text: "^(uploading|processing)\\b", within: "div, span, p" }, { text: "^\\d{1,2}(\\.\\d+)?\\s*%$", within: "div, span, p" }, { css: '[role=progressbar]:not([aria-valuenow="100"])' }],
   captionBox: [{ css: '[data-e2e="caption_container"] [contenteditable="true"]' }, { css: '.public-DraftEditor-content[contenteditable="true"]' }, { css: 'div[contenteditable="true"][role="combobox"]' }, { css: 'div[contenteditable="true"]' }],
   // Add link → Products → Next → search → pick → Next → (the name) → Add
-  addLink: [{ css: '[data-e2e="add_link_button"]' }, { text: "^\\+?\\s*add link$", within: BTN }],
-  productsOption: [{ css: '[data-e2e="link_type_products"]' }, { text: "^products?$", within: `${DLG} [role=option], ${DLG} [role=tab], ${DLG} [role=radio], ${DLG} button, ${DLG} label, ${DLG} li` }],
+  // TikTok Studio shows "Add link" as a label with a "+ Add" button beside it (Drew's post: the AI
+  // pressed "Add" every time, 2026-10-05): an Add button next to the words "Add link".
+  addLink: [{ css: '[data-e2e="add_link_button"]' }, { text: "^\\+?\\s*add link$", within: BTN }, { css: "button, [role=button]", has: "^\\+?\\s*add$", near: "\\b(add )?link\\b", notIn: DLG_ANY }],
+  productsOption: [{ css: '[data-e2e="link_type_products"]' }, { text: "^((tiktok )?shop )?products?$", within: inDlg("[role=option], [role=tab], [role=radio], button, label, li") }],
   linkNext: [{ text: "^next$", within: DLG_BTN }],
   productSearch: [{ css: 'input[placeholder*="Search product" i]' }, { css: `${DLG} input[type="search"]` }, { css: `${DLG} input[placeholder*="Search" i]` }],
   // The product rows, most specific first. TikTok's showcase is a table with a radio per row; the old
@@ -266,14 +339,28 @@ const TARGETS = {
   productSelected: [{ css: `${DLG} input[type=radio]:checked, ${DLG} [role=radio][aria-checked=true]`, rowOf: true }, { css: `${DLG} [role=option][aria-selected=true], ${DLG} [role=row][aria-selected=true]` }],
   productNoResults: [{ text: "(no (products|results)( found)?|couldn.t find (any|that)|nothing found)", within: `${DLG} div, ${DLG} p, ${DLG} span` }],
   productNext: [{ text: "^next$", within: DLG_BTN }],
-  productNameInput: [{ css: `${DLG} input[name="productName"]` }, { css: `${DLG} input[placeholder*="name" i]` }, { css: `${DLG} input[maxlength]:not([type=search])` }],
-  productNameError: [{ text: "(invalid|unsupported|special) characters?|characters? (that )?(are|is) not (allowed|supported)|can.t (contain|include)", within: `${DLG} div, ${DLG} p, ${DLG} span` }],
-  productAdd: [{ text: "^add$", within: DLG_BTN }],
+  // The link name field. TikTok's real one was missed by the first three (Drew's post, 2026-10-05:
+  // "no name step showed", then Add refused a "|"): fields labelled name/title in the dialog, then
+  // ANY text field in the dialog holding characters TikTok rejects.
+  productNameInput: [
+    { css: inDlg('input[name="productName"]') },
+    { css: inDlg(`input[placeholder*="name" i]${NOT_SEARCH}, input[aria-label*="name" i]${NOT_SEARCH}, textarea[aria-label*="name" i], [data-e2e*="name" i] input${NOT_SEARCH}`) },
+    { css: inDlg(`input[maxlength]${NOT_SEARCH}`) },
+    { css: NAME_FIELD, near: "\\b(product|link) (name|title)\\b|^\\s*(name|title)\\b", notIn: "[role=row], tr, [role=listbox]" },
+    { css: NAME_FIELD, valueRe: REJECTED_CHARS },
+  ],
+  productNameError: [{ text: "(invalid|unsupported|special|illegal|not (allowed|supported|valid))\\s*(characters?|symbols?|emojis?)|characters?.{0,40}(not|n.t) (allowed|supported|valid|accepted)|can.?t (contain|include|use)|cannot (contain|include|use)|only (letters|numbers|alphanumeric)|remove (the )?(special|invalid|unsupported)", within: `${inDlg("div, p, span")}, [role=alert], [class*=toast i], [class*=error i]` }],
+  productAdd: [{ text: "^(\\+\\s*)?(add|confirm)$", within: DLG_BTN }],
   dialog: [{ css: DLG }],
   postButton: [{ css: 'button[data-e2e="post_video_button"]' }, { text: "^post( now)?$", within: "button" }],
   // a "Post now?" confirmation, only ever inside a dialog (never the page's own button twice)
   postNowDialog: [{ text: "^post now$", within: DLG_BTN }],
-  posted: [{ text: "(everyone can see this|your video (has been|is being|was) (posted|published|uploaded)|video (posted|published)|manage your posts|high[- ]quality (version|upload))", within: "div, span, p, h1, h2, h3" }],
+  posted: [{ text: "(everyone can see this|(only you|your friends|your followers|followers|friends) can see this|your video (has been|is being|was) (posted|published|uploaded)|video (posted|published)|manage your posts|high[- ]quality (version|upload))", within: "div, span, p, h1, h2, h3" }],
+  // "Who can watch this video": TikTok's dropdown showing the choice (Everyone / Friends / Only you).
+  privacyControl: [
+    { css: '[data-e2e*="visibility" i] [role=combobox], [data-e2e*="visibility" i] button, [data-e2e*="visibility" i] [aria-haspopup], [data-e2e*="privacy" i] [role=combobox], [data-e2e*="privacy" i] button, [data-e2e*="privacy" i] [aria-haspopup]' },
+    { css: "[role=combobox], [aria-haspopup], button, [role=button], select, div[tabindex]", has: PRIVACY_ANY, near: WHO, notIn: DLG_ANY },
+  ],
   captcha: [{ css: '#captcha-verify-image, .captcha_verify_container, .captcha-verify-container, [class*="captcha_verify"], [id*="captcha-verify"], iframe[src*="captcha"]' }, { text: "(drag the (slider|puzzle)|verify to continue|select 2 objects that are the same shape)", within: "div, span, p" }],
   login: [{ css: '[data-e2e="login-modal"], [data-e2e="login-title"]' }, { text: "^log in to tiktok$", within: "h1, h2, div, span" }],
   // TikTok pushing back on the account (the cloud poster backs off for a day; never retries into a ban)
@@ -282,7 +369,8 @@ const TARGETS = {
 
 // The steps of one post. Manual stops on the filled-in page (handoff) and watches for the creator's
 // own Post; Auto presses Post now and waits for TikTok's success notice. No product = no product
-// steps. Playlist and location are never touched: they stay empty.
+// steps. Playlist and location are never touched: they stay empty. "Who can watch this video" is
+// set (and read back) right before Post or the handoff (privacy, 2026-10-06).
 // Speed (2026-10-05): the description and the product go in WHILE TikTok uploads the video (TikTok
 // Studio shows the form as soon as the file is chosen). wait_processed comes last, right before
 // Post, and checks the description again in case TikTok rewrote it when the upload finished.
@@ -290,7 +378,7 @@ const PRODUCT_STEPS = ["product_open", "product_tab", "product_search", "product
 function planSteps({ mode, product }) {
   const steps = ["open", "upload", "caption"];
   if (product) steps.push(...PRODUCT_STEPS);
-  steps.push("wait_processed");
+  steps.push("wait_processed", "privacy");
   if (mode === "manual") steps.push("handoff");
   else steps.push("post", "confirm_posted");
   return steps;
@@ -307,7 +395,7 @@ const TIMEOUTS = {
   stuck: 3 * 60 * 1000,     // the upload showing the same progress this long → the creator
   posted: 60000,            // TikTok's success notice after Post
   creator: 2 * 60 * 1000,   // a step handed to the creator ("needs you") before this video gives up
-  ai: 40000,                // one answer from Groot (the platform's route allows 30 s)
+  ai: 60000,                // one answer from Groot (Opus 5.5 with a reasoning budget; the platform's route allows 60 s)
   cdp: 15000,               // one page script or DevTools command
   blocker: 15 * 60 * 1000,  // a captcha or log-in the creator is doing
   handoff: 30 * 60 * 1000,  // Manual: the creator's own Post
@@ -323,15 +411,21 @@ const STEP_HELP = {
   product_search: "In the TikTok window, search your showcase for the product.",
   product_pick: "In the TikTok window, select the product in the list.",
   product_next: "In the TikTok window, press Next in the product box.",
-  product_add: "In the TikTok window, press Add in the product box.",
+  product_name: "In the TikTok window, take the symbols (like | or emoji) out of the product name in the product box, then press Add.",
+  product_add: "In the TikTok window, press Add in the product box. If TikTok says the name has characters it won't take, delete those characters first.",
+  privacy: "In the TikTok window, set \"Who can watch this video\" to the choice you want before you post.",
   post: "Groot can't find the Post button. Press Post in the TikTok window.",
   confirm_posted: "Groot can't tell if it posted. Look at the TikTok window: if Post is still there, press it.",
 };
 
-// Which steps may ask Groot (their goals are a fixed table on the platform, STEP_GOALS). Never
-// product_pick by itself (the product must be the creator's: a row is checked against their words
-// even after the AI clicked it) and never product_name (the name is never rewritten by the AI).
-const AI_STEPS = new Set(["upload", "wait_processed", "caption", "product_open", "product_tab", "product_search", "product_pick", "product_next", "product_add", "post", "confirm_posted"]);
+// Which steps may ask Groot (their goals are a fixed table on the platform, STEP_GOALS). The product
+// is never the AI's choice (a row it clicks is checked against the creator's words). On the name
+// steps the AI may only type a cleaned name (nameFixes: TikTok's title with only the rejected
+// characters out), never a name of its own (2026-10-06: Drew had to fix a "|" by hand).
+const AI_STEPS = new Set(["upload", "wait_processed", "caption", "product_open", "product_tab", "product_search", "product_pick", "product_next", "product_name", "product_add", "privacy", "post", "confirm_posted"]);
+// Steps whose AI fixes are LEARNED (recorded on the platform, tried first next time): presses on
+// buttons, fields and options, never the product choice, the description or the upload.
+const LEARNABLE = new Set(["product_open", "product_tab", "product_next", "product_name", "product_add", "privacy", "post"]);
 const STEP_WORDS = {
   open: "Opening TikTok Studio",
   upload: "Uploading the video",
@@ -344,6 +438,7 @@ const STEP_WORDS = {
   product_next: "Picking the product",
   product_name: "Checking the product name",
   product_add: "Adding the product",
+  privacy: "Checking who can watch",
   handoff: "Ready for you to post",
   post: "Posting",
   confirm_posted: "Checking it posted",
@@ -370,8 +465,13 @@ function validateAction(a, view, values) {
       if (!text || !values.map((v) => (v || "").trim()).filter(Boolean).includes(text)) return stop("Groot tried to type something that isn't this post's.");
       if (a.ref !== null && a.ref !== undefined && (!Number.isInteger(a.ref) || !has(a.ref))) return stop("Groot pointed at something that isn't there.");
       if (Number.isInteger(a.ref) && pw(a.ref)) return { action: "need_user", reason: "password", message: "TikTok wants your password. Type it yourself." };
-      return { action: "type", text, ref: Number.isInteger(a.ref) ? a.ref : null };
+      return { action: "type", text, ref: Number.isInteger(a.ref) ? a.ref : null, ...(a.clear === true ? { clear: true } : {}) };
     }
+    // empty a box (select all, delete) before typing into it again
+    case "clear":
+      if (!Number.isInteger(a.ref) || !has(a.ref)) return stop("Groot pointed at something that isn't there.");
+      if (pw(a.ref)) return { action: "need_user", reason: "password", message: "TikTok wants your password. Type it yourself." };
+      return { action: "clear", ref: a.ref };
     case "press": return KEYS.includes(a.key) ? { action: "press", key: a.key } : stop("Groot tried a key it isn't allowed to press.");
     case "scroll": return Number.isFinite(a.dy) ? { action: "scroll", dy: Math.max(-2000, Math.min(2000, a.dy)) } : stop("Groot couldn't work out the next step.");
     case "wait": return { action: "wait", ms: Math.max(300, Math.min(5000, Number(a.ms) || 1500)) };
@@ -379,6 +479,76 @@ function validateAction(a, view, values) {
     case "need_user": return { action: "need_user", reason: ["captcha", "login", "password", "other"].includes(a.reason) ? a.reason : "other", message: str(a.message, 200) || "TikTok needs you for a moment." };
     default: return stop("Groot couldn't work out the next step.");
   }
+}
+
+// The text the AI may type on a step: the caption, the product, and on the name steps the cleaned
+// names of what TikTok shows in the dialog. The platform allows the same (groot-post.ts).
+function typeValues(step, job, view) {
+  return [captionText(job.caption, job.hashtags), job.product || "", ...(NAME_STEPS.has(step) ? nameFixes(view) : [])];
+}
+// A plan from the AI: at most this many actions in one answer (the platform caps it too).
+const MAX_PLAN = 5;
+
+// ---- learning (2026-10-06) ------------------------------------------------------------------------
+// When the AI gets a LEARNABLE step done, what it pressed is kept on the platform (per creator, and
+// for everyone without anything personal) as a recipe: [{ do: click | clear | type | press,
+// target: an element's description, value?: "clean_name", key? }]. Later posts try the recipe
+// FIRST; a recipe that misses is reported and demoted (the platform stops serving it after misses
+// in a row), so a stale one is never trusted for long.
+// An element as the snapshot saw it → its description: role, tag, its own words or aria-label,
+// data-e2e, placeholder, type, in a dialog or not, the words around it. A privacy option's words
+// are a VALUE (the job's choice), so they are kept out and marked instead.
+const clip = (v, n) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, n) : "");
+function describeElement(e) {
+  if (!e || typeof e !== "object") return null;
+  const d = { role: clip(e.role, 30), tag: clip(e.tag, 20) };
+  const text = clip(e.text, 80);
+  const label = clip(e.label, 80);
+  if (text && text.length <= 60) d.text = text;
+  if (label && label.length <= 60) d.label = label;
+  if (e.e2e) d.e2e = clip(e.e2e, 60);
+  if (e.ph) d.ph = clip(e.ph, 60);
+  if (e.type) d.type = clip(e.type, 20);
+  if (e.dlg) d.dlg = true;
+  if (e.near) d.near = clip(e.near, 60);
+  const pv = new RegExp(PRIVACY_ANY, "i");
+  if ((d.text && pv.test(d.text)) || (d.label && pv.test(d.label))) { delete d.text; delete d.label; d.privacy = true; }
+  if (d.near && pv.test(d.near) && !new RegExp(WHO, "i").test(d.near)) delete d.near;
+  return d.role || d.tag ? d : null;
+}
+// Before a fix leaves this computer: any words of THIS post (caption, hashtags, product) come out of
+// its descriptions (the platform checks again before it keeps anything).
+function scrubRecipe(recipe, job) {
+  const words = new Set([job && job.caption, ...((job && job.hashtags) || []), job && job.product].filter(Boolean).join(" ").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 4));
+  const mine = (t) => typeof t === "string" && t.toLowerCase().split(/[^\p{L}\p{N}]+/u).some((w) => words.has(w));
+  return recipe.map((a) => {
+    if (!a || !a.target) return a;
+    const t = { ...a.target };
+    for (const k of ["text", "label", "ph", "near"]) if (mine(t[k]) || (typeof t[k] === "string" && /[#@]/.test(t[k]))) delete t[k];
+    return { ...a, target: t };
+  });
+}
+const OPTION_ROLES = /^(option|menuitem|menuitemradio|radio|li|label)$/;
+// The ways to find a learned target now. A privacy OPTION is found by the job's choice; anything
+// else by its description (page.js FIND `learned`).
+function learnedWays(target, privacy = "everyone") {
+  if (!target || typeof target !== "object") return [];
+  if (target.privacy && (OPTION_ROLES.test(target.role || "") || OPTION_ROLES.test(target.tag || ""))) return privacyOptionWays(privacy);
+  return [{ learned: target }];
+}
+// The page variant a fix was found on: the address's path (numbers folded) and the open dialog's
+// title, so a fix for the product box is told apart from one for the upload page.
+function variantOf(view) {
+  let p = "";
+  try { p = new URL(view.url).pathname.toLowerCase().replace(/\d+/g, "#").replace(/\/+$/, ""); } catch { p = ""; }
+  const d = String((view && view.dialog) || "").toLowerCase().replace(/[^\p{L} ]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 40);
+  return `${p}|${d}`;
+}
+const RECIPE_DO = new Set(["click", "clear", "type", "press"]);
+// A recipe from the platform, checked before it is used: known actions, targets that describe
+// something, at most MAX_PLAN + 1 actions.
+function isRecipe(r) {
+  return Array.isArray(r) && r.length > 0 && r.length <= MAX_PLAN + 1 && r.every((a) => a && RECIPE_DO.has(a.do) && (a.do === "press" ? KEYS.includes(a.key) : a.target && typeof a.target === "object" && (a.target.role || a.target.tag)) && (a.do !== "type" || a.value === "clean_name"));
 }
 
 // ---- human pacing --------------------------------------------------------------------------------
@@ -403,6 +573,8 @@ module.exports = { isProductRow, SHOWCASE_PAGES,
   TIKTOK_STUDIO_URL, TIKTOK_UPLOAD_URL, PLATFORMS, TARGETS, AI_STEPS, STEP_WORDS, STEP_HELP, TIMEOUTS, PRODUCT_STEPS, KEYS, MAX_AI_PER_STEP, MAX_AI_PER_POST, DELAYS, NOT_IN_SHOWCASE, PICK_AT,
   normCaption, captionParts, showcaseList,
   isAllowedCaller, isVideoUrl, isTikTokUrl, isLoginProviderUrl, parseSource, validatePostRequest, captionText, safeFileName,
-  productWords, productScore, pickProduct, searchTerms, cleanProductName,
+  productWords, productScore, pickProduct, searchTerms, cleanProductName, nameFixes, NAME_STEPS, MAX_VALUE, REJECTED_CHARS,
+  PRIVACY, PRIVACY_VALUES, parsePrivacy, privacyOf, privacyOptionWays,
+  LEARNABLE, MAX_PLAN, typeValues, describeElement, learnedWays, variantOf, isRecipe, scrubRecipe,
   planSteps, validateAction, delay, chunks,
 };

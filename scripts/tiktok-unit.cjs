@@ -65,13 +65,14 @@ test("file names are safe", () => {
 
 console.log("the scripted-step planner");
 test("Auto with a product: Drew's walk (upload, description, Add link, Products, Next, search, pick, Next, name, Add, Post now, success)", () => {
-  assert.deepStrictEqual(R.planSteps({ mode: "auto", product: "Hydro" }), ["open", "upload", "caption", "product_open", "product_tab", "product_search", "product_pick", "product_next", "product_name", "product_add", "wait_processed", "post", "confirm_posted"]);
+  assert.deepStrictEqual(R.planSteps({ mode: "auto", product: "Hydro" }), ["open", "upload", "caption", "product_open", "product_tab", "product_search", "product_pick", "product_next", "product_name", "product_add", "wait_processed", "privacy", "post", "confirm_posted"]);
 });
 test("speed: the description and product go in while TikTok uploads; the upload is waited for right before Post", () => {
   for (const mode of ["auto", "manual"]) for (const product of ["x", null]) {
     const s = R.planSteps({ mode, product });
     assert(s.indexOf("caption") < s.indexOf("wait_processed"), "description first");
-    assert.strictEqual(s[s.indexOf("wait_processed") + 1], mode === "auto" ? "post" : "handoff");
+    assert.strictEqual(s[s.indexOf("wait_processed") + 1], "privacy", "who can watch is checked right before Post or the handoff");
+    assert.strictEqual(s[s.indexOf("privacy") + 1], mode === "auto" ? "post" : "handoff");
   }
 });
 test("TikTok Studio, not tiktok.com/upload", () => {
@@ -83,9 +84,64 @@ test("Manual vs Auto: the same filling-in, only Auto presses Post now", () => {
   assert.deepStrictEqual(a.slice(-2), ["post", "confirm_posted"]);
   assert.deepStrictEqual(m.slice(-1), ["handoff"]);
 });
-test("the link name is never the AI's; a row the AI clicks is still held to the creator's words", () => {
-  assert(!R.AI_STEPS.has("product_name"));
+test("the link name: the AI may only take out what TikTok rejects; a row the AI clicks is still held to the creator's words", () => {
+  assert(R.AI_STEPS.has("product_name") && R.AI_STEPS.has("product_add") && R.AI_STEPS.has("privacy"));
   assert(R.AI_STEPS.has("product_pick"));
+  assert(!R.LEARNABLE.has("product_pick") && !R.LEARNABLE.has("caption") && !R.LEARNABLE.has("upload"), "the product, the description and the upload are never replayed");
+  const view = { width: 1000, height: 800, elements: [{ ref: 0, role: "input", tag: "input", type: "text", value: "Comfrt | Weekend Slipper | Faux Suede", dlg: true, name: "" }, { ref: 1, role: "button", tag: "button", name: "Add", dlg: true }, { ref: 2, role: "textbox", tag: "div", name: "", value: "my caption #tag" }] };
+  assert.deepStrictEqual(R.nameFixes(view), ["Comfrt Weekend Slipper Faux Suede"], "only fields in the dialog; level 2 adds nothing new here");
+  const job = { caption: "my caption", hashtags: ["tag"], product: "comfort slipper" };
+  const vals = R.typeValues("product_add", job, view);
+  assert.deepStrictEqual(R.validateAction({ action: "type", text: "Comfrt Weekend Slipper Faux Suede", ref: 0, clear: true }, view, vals), { action: "type", text: "Comfrt Weekend Slipper Faux Suede", ref: 0, clear: true });
+  assert.strictEqual(R.validateAction({ action: "type", text: "Best Slippers Ever", ref: 0 }, view, vals).action, "need_user", "never a name of its own");
+  assert.strictEqual(R.validateAction({ action: "type", text: "Comfrt Weekend Slipper Faux Suede", ref: 0 }, view, R.typeValues("caption", job, view)).action, "need_user", "a cleaned name only on the name steps");
+  assert.deepStrictEqual(R.validateAction({ action: "clear", ref: 0 }, view, vals), { action: "clear", ref: 0 });
+  assert.strictEqual(R.validateAction({ action: "clear", ref: 9 }, view, vals).action, "need_user");
+  const long = { ...view, elements: [{ ...view.elements[0], value: `${"x".repeat(R.MAX_VALUE)}|` }] };
+  assert.deepStrictEqual(R.nameFixes(long), [], "a value cut short is never offered (it would rename the product)");
+});
+test("TikTok's name complaints are read; its headings are not", () => {
+  const re = R.TARGETS.productNameError.map((w) => new RegExp(w.text, "i"));
+  const says = (t) => re.some((r) => r.test(t));
+  for (const t of ["Invalid characters. Remove them and try again.", "Unsupported characters", "Special characters are not allowed", "The name contains characters that aren't supported", "Name can't contain emojis", "Only letters and numbers are supported", "This field cannot contain symbols"]) assert(says(t), t);
+  for (const t of ["Product name", "Add product", "Name", "Products", "30/30"]) assert(!says(t), t);
+});
+test("who can watch: the creator's choice, else Everyone; read from what TikTok shows", () => {
+  const base = { postId: "p", videoUrl: "https://a.public.blob.vercel-storage.com/x.mp4", mode: "auto" };
+  assert.strictEqual(R.validatePostRequest(base).value.privacy, "everyone", "default Everyone");
+  assert.strictEqual(R.validatePostRequest({ ...base, privacy: "Only me" }).value.privacy, "only_me");
+  assert.strictEqual(R.validatePostRequest({ ...base, privacy: "friends" }).value.privacy, "friends");
+  assert.strictEqual(R.validatePostRequest({ ...base, privacy: "public" }).value.privacy, "everyone");
+  assert(!R.validatePostRequest({ ...base, privacy: "my mom" }).ok);
+  assert.strictEqual(R.validatePostRequest({ ...base, platform: "trybe", brand: "Comfrt" }).value.privacy, null, "Trybe has no such setting");
+  assert.strictEqual(R.privacyOf("Everyone"), "everyone");
+  assert.strictEqual(R.privacyOf("Only you"), "only_me");
+  assert.strictEqual(R.privacyOf("Only me ▾"), "only_me");
+  assert.strictEqual(R.privacyOf("Friends"), "friends");
+  assert.strictEqual(R.privacyOf("Who can watch this video"), null);
+  const opt = (v, t) => R.privacyOptionWays(v).some((w) => new RegExp(w.text, "i").test(t));
+  assert(opt("everyone", "Everyone") && opt("everyone", "Everyone Anyone on TikTok") && !opt("everyone", "Only you"));
+  assert(opt("only_me", "Only you") && opt("only_me", "Only me") && !opt("only_me", "Everyone"));
+  const posted = R.TARGETS.posted.map((w) => new RegExp(w.text, "i"));
+  assert(posted.some((r) => r.test("Only you can see this")), "a private post's notice counts as posted too");
+});
+test("learning: what an element is (no personal words), the page variant, recipes", () => {
+  const d = R.describeElement({ ref: 3, role: "button", tag: "button", name: "Add", text: "Add", e2e: "add-btn", dlg: true, near: "add link", x: 1, y: 2, w: 3, h: 4 });
+  assert.deepStrictEqual(d, { role: "button", tag: "button", text: "Add", e2e: "add-btn", dlg: true, near: "add link" });
+  const p = R.describeElement({ role: "button", tag: "button", text: "Only you", near: "who can watch this video" });
+  assert.deepStrictEqual(p, { role: "button", tag: "button", near: "who can watch this video", privacy: true }, "a privacy value is a value, not a name");
+  assert.deepStrictEqual(R.learnedWays({ role: "option", tag: "div", privacy: true }, "friends"), R.privacyOptionWays("friends"), "a learned privacy option follows the job's choice");
+  assert.deepStrictEqual(R.learnedWays(d), [{ learned: d }]);
+  assert.strictEqual(R.variantOf({ url: "https://www.tiktok.com/tiktokstudio/upload?from=x", dialog: "Add product" }), "/tiktokstudio/upload|add product");
+  assert.strictEqual(R.variantOf({ url: "https://www.tiktok.com/tiktokstudio/upload/123", dialog: "" }), "/tiktokstudio/upload/#|");
+  assert(R.isRecipe([{ do: "click", target: d }, { do: "press", key: "Enter" }, { do: "type", value: "clean_name", target: d }]));
+  assert(!R.isRecipe([{ do: "type", value: "caption", target: d }]), "only a cleaned name is ever replayed as typing");
+  assert(!R.isRecipe([{ do: "click", target: {} }]));
+  assert(!R.isRecipe([{ do: "eval", target: d }]));
+  assert(!R.isRecipe([]));
+  const job = { caption: "comfy weekend slippers", hashtags: ["cozyvibes"], product: "Comfrt Weekend Slipper" };
+  const scrubbed = R.scrubRecipe([{ do: "click", target: { role: "button", tag: "button", text: "Add", near: "uploading 50% description comfy weekend slippers #cozyvibes" } }, { do: "click", target: { role: "div", tag: "div", text: "Comfrt chip", label: "@drew" } }, { do: "press", key: "Enter" }], job);
+  assert.deepStrictEqual(scrubbed, [{ do: "click", target: { role: "button", tag: "button", text: "Add" } }, { do: "click", target: { role: "div", tag: "div" } }, { do: "press", key: "Enter" }], "the post's own words never leave this computer in a fix");
 });
 test("Manual stops at the handoff and never posts", () => {
   const s = R.planSteps({ mode: "manual", product: "Hydro" });
@@ -106,7 +162,7 @@ test("timeouts: a missing button goes to Groot in seconds; the upload waits long
   const T = R.TIMEOUTS;
   assert(T.find <= 10000 && T.results <= 10000 && T.goto <= 30000);
   assert(T.stall <= 30000, "nothing on screen about the upload: Groot looks within 30 s");
-  assert(T.stuck <= 5 * 60000 && T.creator <= 3 * 60000 && T.ai <= 45000 && T.cdp <= 20000);
+  assert(T.stuck <= 5 * 60000 && T.creator <= 3 * 60000 && T.ai <= 65000 && T.cdp <= 20000);
   for (const [k, v] of Object.entries(T)) assert(Number.isFinite(v) && v > 0, k);
 });
 test("every step Groot can try has plain words for the creator when Groot can't", () => {
